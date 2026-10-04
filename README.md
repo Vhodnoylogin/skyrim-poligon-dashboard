@@ -1,8 +1,8 @@
-# Skyrim-Polygon chat tool
+# Skyrim-Poligon-Dashboard
 
 Tags: testing, tools, devbench
 
-This project tool routes mod test orders to one dedicated Codex chat. It is not
+This standalone chat tool routes mod test orders to one dedicated Codex chat. It is not
 a game mod. It wraps the independent Skyrim Autotest executor and has its own
 durable multi-chat queue, read-only board and evidence return outbox.
 
@@ -34,21 +34,22 @@ an incomplete order; it does not invent the test or patch the mod.
 
 ## Location and commands
 
-Run from any cwd with the absolute `polygon.py` path. Default session root is
-derived from this project-tool location; `--root` overrides it for another host
-or isolated tests. `local/skyrim-polygon/config.json` points to our executor and
+Clone this repository and run its `polygon.py` from any cwd with explicit
+`--root <SESSION-ROOT>` (outside Git), or set `SKYRIM_POLYGON_ROOT`. From within
+a configured session directory its ancestors may be discovered by the existing
+`local/skyrim-polygon/config.json`; the source checkout never determines the host. `local/skyrim-polygon/config.json` points to our executor and
 the actual game's DevBench runtime metadata. No credentials belong in orders.
 
 ```text
-python <project-tools>/skyrim-polygon/polygon.py submit <external-order.json>
-python <project-tools>/skyrim-polygon/polygon.py board
-python <project-tools>/skyrim-polygon/polygon.py show <order-id>
-python <project-tools>/skyrim-polygon/polygon.py next
-python <project-tools>/skyrim-polygon/polygon.py reconcile
-python <project-tools>/skyrim-polygon/polygon.py recover-active
-python <project-tools>/skyrim-polygon/polygon.py outbox
-python <project-tools>/skyrim-polygon/polygon.py delivered <order-id> --note "verified app delivery receipt"
-python <project-tools>/skyrim-polygon/polygon.py serve --port 8934
+python <repository>/polygon.py --root <SESSION-ROOT> submit <external-order.json>
+python <repository>/polygon.py --root <SESSION-ROOT> board
+python <repository>/polygon.py --root <SESSION-ROOT> show <order-id>
+python <repository>/polygon.py --root <SESSION-ROOT> next
+python <repository>/polygon.py --root <SESSION-ROOT> reconcile
+python <repository>/polygon.py --root <SESSION-ROOT> recover-active
+python <repository>/polygon.py --root <SESSION-ROOT> outbox
+python <repository>/polygon.py --root <SESSION-ROOT> delivered <order-id> --note "verified app delivery receipt"
+python <repository>/polygon.py --root <SESSION-ROOT> serve --port 8934
 ```
 
 The local board is http://127.0.0.1:8934/. The server is read-only, local-machine
@@ -59,8 +60,10 @@ On another machine recreate `local/skyrim-polygon/config.json` with schemaVersio
 executor (our checkout or extracted distribution), threadId (the dedicated app
 chat), journalChat="skyrim-polygon", boardUrl, gameExecutable and the
 devbenchRuntimeFiles list resolved from that machine's game/MO2 configuration.
+For voice, configure `voiceListener` to the independent ASR listener's absolute
+path. Start from host-config.example.json; keep the real config outside Git.
 Prepare a separate runner config using Skyrim Autotest's `init` and acquisition
-manifest. No external dependency binaries/source belong in this journal.
+manifest. No external dependency binaries/source belong in this repository.
 The optional skill validator uses PyYAML6.0.2 from PyPI in an external temporary
 validation directory; Polygon's runtime is Python standard library only.
 
@@ -119,11 +122,11 @@ Assisted orders wait for the player and are never started by the automatic queue
 After the owner says they are ready/in game:
 
 ```text
-python <project-tools>/skyrim-polygon/polygon.py assisted-start <order-id>
-python <project-tools>/asr-listen.py --devices
-python <project-tools>/skyrim-polygon/polygon.py voice-start --device "EXACT HEADSET MIC NAME"
-python <project-tools>/skyrim-polygon/polygon.py assisted-poll <order-id>
-python <project-tools>/skyrim-polygon/polygon.py assisted-finish <order-id> --note "Owner completed the requested steps"
+python <repository>/polygon.py --root <SESSION-ROOT> assisted-start <order-id>
+python <CONFIGURED-INDEPENDENT-LISTENER>/asr-listen.py --devices
+python <repository>/polygon.py --root <SESSION-ROOT> voice-start --device "EXACT HEADSET MIC NAME"
+python <repository>/polygon.py --root <SESSION-ROOT> assisted-poll <order-id>
+python <repository>/polygon.py --root <SESSION-ROOT> assisted-finish <order-id> --note "Owner completed the requested steps"
 ```
 
 Use the existing microphone listener if already owned/live; do not `--force` it.
@@ -186,8 +189,44 @@ own returned packet, not arbitrary other chats' journals.
 ## Verification
 
 ```text
-python -m unittest discover -s <project-tools>/skyrim-polygon -p test_polygon.py -v
+python -m unittest discover -s <repository> -p test_polygon.py -v
 ```
 
 Queue/recovery boundaries are tested with isolated temporary files; these checks
 do not claim a new live-game run or headset microphone qualification.
+
+## Development and operator ownership
+
+Repository: https://github.com/Vhodnoylogin/skyrim-poligon-dashboard (main).
+Skyrim-Poligon-Dashboard is the development chat for this service/dashboard.
+Skyrim-Polygon is the separate operator chat; its queue and heartbeat remain
+independent of development conversations. The owner chose the spelling Poligon
+for this repository/development chat; existing Polygon CLI/runtime/order IDs
+remain compatible. The agent instructions in AGENTS.md are part of this tool.
+
+This repository was extracted with its original tool history from ai-project-meta,
+prefix projects/claude-skyrim-vr/tools/skyrim-polygon at source commit 963e412.
+Only that prefix was exported: no project reports, database or raw run data.
+The old project polygon.py command delegates to this checkout through external
+host config's dashboardRepository, preserving the existing runtime directory.
+
+## Acquire dependencies again
+
+- Python 3.11+: https://www.python.org/downloads/windows/ . Runtime/tests use stdlib.
+- Skyrim Autotest: obtain the owner's independent executor distribution or checkout;
+  read its README, docs/configuration.md and third-party acquisition manifest.
+  It has no public Git remote at extraction time; do not imply a public download.
+  Configure host executor to the directory containing skyrim_autotest/.
+- DevBench: https://github.com/alandtse/devbench . Install a compatible VR build;
+  configure the actual runtime metadata paths, never a guessed HTTP port.
+- Optional World Observer: https://github.com/Vhodnoylogin/skyrim-world-observer .
+  Acquire/build/install separately and pin the installed DLL for relevant orders.
+- Optional headset speech: use the Skyrim VR project's independent asr-listen.py
+  and knowledge/voice-channel.md, or obtain that integration from the owner.
+  It is not bundled/publicly downloadable as part of this repository.
+- Game, MO2 and driver acquisition is handled by the executor's manifest and
+  the user's installation. They are never downloaded or installed by this board.
+
+The queue/dashboard can be developed and tested without game dependencies.
+Live automatic/assisted execution requires the configured external integrations;
+headset microphone qualification requires a real player session.

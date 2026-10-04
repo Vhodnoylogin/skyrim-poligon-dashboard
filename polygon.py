@@ -22,10 +22,23 @@ from urllib.request import Request, urlopen
 import uuid
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_ROOT = HERE.parents[4]
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 SHA = re.compile(r"[0-9a-f]{64}")
 READ_KINDS = {"state", "player", "refs", "scene", "vm", "world_observer"}
+
+
+def session_root(explicit=None):
+    """Resolve host data independently of the source checkout's location."""
+    if explicit is not None:
+        return Path(explicit).resolve()
+    configured = os.environ.get("SKYRIM_POLYGON_ROOT")
+    if configured:
+        return Path(configured).resolve()
+    cwd = Path.cwd().resolve()
+    for candidate in (cwd, *cwd.parents):
+        if (candidate / "local/skyrim-polygon/config.json").is_file():
+            return candidate
+    raise ValueError("Set --root or SKYRIM_POLYGON_ROOT to the host session directory (outside Git)")
 
 
 def read(path):
@@ -477,8 +490,9 @@ class Polygon:
     def voice_start(self, device):
         if os.name != "nt":
             raise ValueError("Headset audio requires Windows")
-        tools = HERE.parent
-        script = tools / "asr-listen.py"
+        script = Path(required_string(self.host(), "voiceListener")).resolve()
+        if not script.is_file():
+            raise ValueError("Configured voiceListener is unavailable; acquire/configure the independent listener")
         result = subprocess.run([sys.executable, str(script), "--devices"], capture_output=True, text=True, encoding="utf-8")
         if result.returncode or not device.strip() or device.casefold() not in result.stdout.casefold():
             raise ValueError("Select an actual headset microphone from asr-listen.py --devices; no default-device fallback")
@@ -536,7 +550,7 @@ class Polygon:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--root", type=Path, help="Host session directory outside Git; alternatively SKYRIM_POLYGON_ROOT")
     sub = parser.add_subparsers(dest="command", required=True)
     submit = sub.add_parser("submit")
     submit.add_argument("order", type=Path)
@@ -556,8 +570,8 @@ def main(argv=None):
     note.add_argument("--category", choices=["observation", "player_instruction", "tool_bug", "tool_suspected_bug", "tool_improvement"], required=True)
     note.add_argument("--text", required=True)
     args = parser.parse_args(argv)
-    polygon = Polygon(args.root)
     try:
+        polygon = Polygon(session_root(args.root))
         if args.command == "submit": result = polygon.submit(args.order)
         elif args.command == "board": result = polygon.board()
         elif args.command == "show": result = polygon.get(args.id)

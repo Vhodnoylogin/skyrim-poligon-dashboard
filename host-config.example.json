@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "executor": "ABSOLUTE-EXTERNAL-EXECUTOR-DIRECTORY",
+  "threadId": "ACTUAL-SKYRIM-POLYGON-THREAD-ID",
+  "journalChat": "skyrim-polygon",
+  "boardUrl": "http://127.0.0.1:8934/",
+  "gameExecutable": "ABSOLUTE-GAME-EXECUTABLE",
+  "devbenchRuntimeFiles": ["ABSOLUTE-DEV BENCH-RUNTIME-JSON"],
+  "voiceListener": "ABSOLUTE-INDEPENDENT-ASR-LISTEN-PY"
+}

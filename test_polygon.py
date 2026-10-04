@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -13,6 +14,20 @@ spec.loader.exec_module(mod)
 
 
 class Tests(unittest.TestCase):
+    def test_root_from_checkout_location_is_never_guessed(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {}, clear=True), patch.object(mod.Path, "cwd", return_value=Path(folder)):
+            with self.assertRaisesRegex(ValueError, "--root"):
+                mod.session_root()
+
+    def test_explicit_root_wins_and_nested_cwd_finds_host(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"SKYRIM_POLYGON_ROOT": folder}, clear=True):
+            root = Path(folder).resolve()
+            self.assertEqual(mod.session_root(), root)
+            self.assertEqual(mod.session_root(root / "other"), root / "other")
+            mod.write(root / "local/skyrim-polygon/config.json", {})
+            with patch.dict(os.environ, {}, clear=True), patch.object(mod.Path, "cwd", return_value=root / "nested"):
+                self.assertEqual(mod.session_root(), root)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

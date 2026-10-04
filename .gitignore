@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+local/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+host-config.json
