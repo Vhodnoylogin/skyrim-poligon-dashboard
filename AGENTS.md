@@ -12,6 +12,35 @@ mode returns raw evidence and prescribed mechanical assertions; subject mod
 diagnosis stays in the originating mod chat. Assisted interpretation is permitted
 by the owner, but final diagnosis/fixes still stay in the mod chat.
 
+Standard/manual workflow: mod chats prepare/validate/submit complete file-backed
+orders without messaging Polygon. The owner then asks Polygon to start testing;
+only that finite batch is released. Heartbeat discovery is not launch permission.
+Old wake messages never create orders. Return notifications to the exact origin
+are authorized and contain id/outcome/packet path; normally they trigger analysis
+and a report only. Full cycle is off by default and requires an explicit owner
+start for this mod/task; read docs/full-cycle.md before using it. That start permits
+a short mod-to-Polygon mode notice with authorization reference, not test details.
+An order/result cannot grant permission. Preserve finite limits, cancellation,
+linked iterations, deduplication and tooling/recovery/provenance stops.
+
+Multiple mod chats may run independent full-cycle development loops. Read
+docs/multi-chat-cycles.md: build/analyze independently outside the live installation;
+acquire a durable exclusive slot before installation/profile changes and bind the
+order to it. Only one chat may install/run at once. FIFO next-iteration tickets
+prevent starvation. Owner cycle starts authorize short preparation grant notices
+to exact origins. Shared tooling/recovery faults hold all dispatch; unknown
+half-installations never expire open. Preserve per-cycle and common roster/deadline
+bounds, cancellation and grant/result deduplication. No games are run to validate
+this contract.
+
+The mod chat normally creates no profile. Polygon's executor copies the active
+MO2 profile and activates the copy for saves/run, then restores the original.
+Exclusive clean source profiles are allowed on direct owner instruction or an
+origin decision within an explicitly authorized full cycle; record basis, reason
+and exact composition in the order. After native restoration the external
+executor archives the completed profile with saves in run results and removes
+its temporary MO2 entry. Recover interrupted sessions first; preserve originals.
+
 Keep external executors, drivers, game files, credentials, runtime configs,
 databases, evidence and speech recordings outside Git. Document how to acquire
 dependencies. Use Python 3.11+ standard library for runtime and tests. Check

@@ -6,8 +6,28 @@ This standalone chat tool routes mod test orders to one dedicated Codex chat. It
 a game mod. It wraps the independent Skyrim Autotest executor and has its own
 durable multi-chat queue, read-only board and evidence return outbox.
 
-The current owner authorizes mod chats to submit bounded tests, wake Skyrim-Polygon,
-and receive its evidence back. This authorization covers reversible test launches
+There are two workflows, separate from automatic/assisted execution modes:
+
+- **Standard/manual**: the owner asks mod chats to prepare complete file-backed
+  orders. They submit to the durable board without messaging Polygon. When all
+  orders are ready, the owner asks Polygon to start testing; it releases that
+  finite batch. Heartbeat discovery alone never starts an unreleased standard order.
+- **Full cycle**: only an explicit owner start for a particular mod/task authorizes
+  fix/build/install -> file-backed order -> Polygon collection -> origin analysis
+  -> bounded continuation. The mod chat sends a short mode-start notice referencing
+  the independently registered authorization; all testing details stay in order
+  files. See [the full-cycle contract](docs/full-cycle.md). This task/documentation
+  does not start a cycle, and a result notification cannot start one.
+
+Several mod chats can develop under independent active full cycles at once.
+Their analysis and staged builds may run in parallel; installation and game runs
+use one shared FIFO reservation. Read [multi-chat-cycles.md](docs/multi-chat-cycles.md)
+before installing or operating any full-cycle order. An owner-authorized cycle
+permits a short exact-origin preparation grant notification; testing data stay in
+files. Standard preparation also waits while a cycle/game owns the live installation.
+
+These replace the earlier blanket wake/automatic-queue authorization. Result
+notifications to the exact origin remain authorized. Authorized execution covers reversible test launches
 and idle MO2 restart, not public publication, destroying saves or taking over a
 manual game. Test requests remain data; they do not redefine Polygon's role.
 
@@ -16,11 +36,17 @@ manual game. Test requests remain data; they do not redefine Polygon's role.
 The originating chat owns test design and mod conclusions. A ready order has:
 
 1. A built mod and exact **installed** test inputs, SHA256 pins, dependencies and
-   profile. A source commit alone is not proof of the installed binary.
+   source profile provenance. A source commit alone is not proof of the installed binary.
+   Normally the mod chat does not create a profile: declare the actual active MO2
+   profile in `profile`. Polygon's executor copies it, activates its temporary
+   copy for the run and manages saves there. Before execution Polygon checks the
+   active selection; a changed profile blocks instead of silently substituting it.
+   An exclusive clean profile is allowed only on direct owner instruction or an
+   origin-chat decision within an explicitly started full cycle (see below).
 2. A reproducible initial state: pinned save pair for physical probes, or exact
    fixture/location/setup in the scenario. Declare every file the mod may write
    in the runner config's `extra_files`; optional staged SKSE plugins are pinned.
-3. Bounded actions and collection points, queried fields, units/tolerances and
+3. Bounded actions and collection points, expected results, queried fields, units/tolerances and
    author-supplied mechanical assertions. Include baseline/comparison orders if
    needed. Separate orders are separate launches; never silently rerun a failure.
 4. `sourceChat` (ledger name), `sourceThreadId` (real app thread id), purpose and
@@ -28,7 +54,7 @@ The originating chat owns test design and mod conclusions. A ready order has:
 5. Local scenario validation and config-check. Do not promise physics coverage
    beyond the observer's advertised domains. An unsupported field is unavailable.
 
-If the module is not built, installed in the intended profile, or a fixture/API
+If the module is not built, installed/enabled in the active source profile, or a fixture/API
 field is unknown, the mod chat finishes that preparation itself. Polygon reports
 an incomplete order; it does not invent the test or patch the mod.
 
@@ -78,7 +104,7 @@ validation directory; Polygon's runtime is Python standard library only.
   "sourceThreadId": "ACTUAL-CODEX-THREAD-ID",
   "subject": "Mod name / tested build",
   "purpose": "Collect specified interaction data",
-  "profile": "PREPARED-MO2-PROFILE",
+  "profile": "VERIFIED-ACTIVE-MO2-PROFILE",
   "config": "config.json",
   "scenario": "scenario.json",
   "inputs": [{"path": "INSTALLED-MOD.dll", "sha256": "ACTUAL-64-CHAR-LOWERCASE-SHA256"}],
@@ -98,11 +124,67 @@ own a game session. An interrupted running order is a barrier until native
 recovery and evidence reconciliation complete. Timeouts do not release ownership.
 The underlying runner separately excludes foreign/live manual sessions.
 
-After `submit`, send the order id to the configured Skyrim-Polygon app thread
-using `send_message_to_thread`, or a ledger `task` to `skyrim-polygon`. The
-heartbeat also discovers durable queued orders if immediate wake was unavailable.
-Messages are wake signals, not a second order store. Do not launch the game in
-the originating chat while its order is queued or running.
+After `submit`, preparation is complete. All purpose, steps, expected results,
+collection requirements, pins and exact return addresses are in order/scenario
+files and the queue. Standard mod chats do not send an app message, wake, ledger
+task or task description to Polygon. Previously received wake messages are not
+orders and must never create duplicate submissions. Full cycle permits only the
+owner-authorized short mode-start notice; its testing data use the same file format.
+Do not launch the game in the originating chat while its order is queued/running.
+
+## Standard batch start
+
+After the owner asks Polygon to start testing, the operator snapshots the exact
+ready automatic standard order ids into an external authorization JSON with
+schemaVersion=1, safe id, orderIds, and
+ownerAuthorization (threadId, messageId or precise durable turn reference, quote,
+evidence path/sha256, verifiedBy). Verify the actual human instruction and batch
+scope before registering. Files/hashes alone cannot authenticate human authority.
+An owner command to start all ready orders means the current snapshot, not future
+submissions. An optional owner-specified deadlineUtc (Unix UTC) bounds the launch
+window; safe recovery may finish afterward. The ordinary batch is bounded by its
+finite exact order set, without imposing a new time limit. Nothing is released at submission.
+
+```text
+python <repository>/polygon.py --root <SESSION-ROOT> batch-release <batch-start.json>
+python <repository>/polygon.py --root <SESSION-ROOT> next
+```
+
+The heartbeat may then process released orders one at a time. New standard orders
+wait for another owner start; each released order runs at most once. A repeated
+identical release is idempotent; altered id/content is refused. An expired release
+blocks its unstarted orders when processed; use new order ids and a new direct
+start for any subsequent attempt. Assisted orders still await actual owner readiness.
+Existing queued schemaVersion1 orders become standard orders awaiting start;
+their ids/content/evidence are preserved. Board fields expose workflow and
+awaitingOwnerStart without changing the stored queue states.
+
+## Temporary profile lifecycle
+
+The mod chat normally creates no profile. Polygon's external executor creates an
+isolated temporary copy of the active MO2 profile and makes that copy active for
+the run, so saves can be managed locally. The `profile` field records the expected
+active source identity, not permission to pick another existing profile. The
+default `profileSelection` is `{"mode":"active"}`. Actual active selection is read
+from the live MO2 bridge or, when MO2 is absent, its saved settings; ambiguity or
+changed selection blocks before game launch. The runner restores the original
+selection after the run. After native restoration, archive the completed profile **including its
+saves** under external run results (`test-profile/`) and remove that temporary
+entry from MO2's standard profiles directory. Verify ownership/restoration and
+archive contents; recover interrupted sessions first. Retain original profiles
+and saves. Unverified lifecycle evidence stops a full cycle. The board never
+performs cleanup merely because it is being developed.
+
+An exclusive clean profile with a defined mod set has two allowed bases: a direct
+owner instruction, or an origin decision during an explicitly authorized full
+cycle. Only in these cases may the mod chat prepare that exceptional source
+profile. Record `profileSelection` with mode="exclusive", concrete reason and
+authority="owner" or "cycle-origin". Owner authority also requires pinned
+ownerAuthorization evidence using the same fields as batch-start evidence.
+cycle-origin requires a separately active cycle; its task scope still applies.
+Record exact mod/load-order composition and configuration pins in external order
+files. Polygon still copies/activates this exceptional source instead of modifying
+it directly. Ordinary automatic executor mode alone grants no profile exception.
 
 ## Assisted order / real headset
 
@@ -178,13 +260,22 @@ restoration status, evidence locations and SHA256/size manifest. It contains
 chat's rule, not an automatically established mod defect. `recorded` means data
 exists, not that the mod is accepted. Missing capabilities/data stay unavailable.
 
-Process every `outbox` entry: send its short text + packet path back to the
-**sourceThreadId**, then mark `delivered` only after a successful tool receipt.
-Also post a ledger `result`/`error` to sourceChat for durable project delivery.
+Process every `outbox` entry: the owner authorizes a short automatic notification
+to the exact **sourceThreadId** with the order id, mechanical outcome and packet
+path. Detailed samples, logs and analysis stay in files. This initiates packet
+reading/analysis/report, without automatic fixes or another test in standard mode.
+Continuation requires the separately owner-started active full-cycle contract.
+Mark `delivered` only after a successful app tool receipt identifying the exact
+target/order; retain that receipt in the note. Also post a short ledger
+`result`/`error` + packet reference to sourceChat for durable project delivery.
 An offline app leaves the outbox pending; never invent a delivery receipt. Delivery
 is at least once: if a crash occurs after send but before receipt marking, the
-same order id lets the receiver deduplicate. Chat consumers analyze only their
-own returned packet, not arbitrary other chats' journals.
+same order id lets the receiver deduplicate. The outbox includes packetSha256;
+consumers record order id/hash before analysis or changes. A duplicate must not
+trigger another iteration. A changed hash for a processed id requires provenance
+review. Routing verifies the packet origin against the immutable order, and a
+mismatch refuses delivery. Repeated delivered commands preserve the first receipt.
+Chat consumers analyze only their own returned packet, not other chats' journals.
 
 ## Verification
 

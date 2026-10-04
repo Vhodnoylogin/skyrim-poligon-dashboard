@@ -11,6 +11,7 @@ from datetime import datetime
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -65,6 +66,23 @@ def required_string(obj, key):
     return value
 
 
+def owner_evidence(approval, path, require_deadline=True):
+    evidence = approval.get("ownerAuthorization")
+    if not isinstance(evidence, dict):
+        raise ValueError("Separate ownerAuthorization evidence required")
+    for key in ("threadId", "messageId", "quote", "verifiedBy"):
+        required_string(evidence, key)
+    evidence["path"] = str((path.parent / required_string(evidence, "path")).resolve())
+    if not SHA.fullmatch(evidence.get("sha256", "")) or digest(evidence["path"]) != evidence["sha256"]:
+        raise ValueError("Owner evidence hash mismatch")
+    if evidence["quote"] not in Path(evidence["path"]).read_text(encoding="utf-8-sig"):
+        raise ValueError("Owner quote absent from evidence")
+    deadline = approval.get("deadlineUtc")
+    if (require_deadline or deadline is not None) and (type(deadline) not in (int, float) or not math.isfinite(deadline) or deadline <= time.time()):
+        raise ValueError("Future finite UTC Unix deadline required")
+    return evidence
+
+
 class Polygon:
     def __init__(self, root):
         self.root = Path(root).resolve()
@@ -83,6 +101,19 @@ class Polygon:
             CREATE TABLE IF NOT EXISTS events (
               seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, at REAL, status TEXT, note TEXT);
             CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, started REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS cycles (
+              id TEXT PRIMARY KEY, authorization TEXT NOT NULL,
+              status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '');
+            CREATE TABLE IF NOT EXISTS releases (id TEXT PRIMARY KEY, authorization TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS released_orders (id TEXT PRIMARY KEY, release_id TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS cycle_slots (
+              seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+              cycle_id TEXT NOT NULL, iteration INTEGER NOT NULL, order_id TEXT UNIQUE NOT NULL,
+              request TEXT NOT NULL, status TEXT NOT NULL, receipt TEXT, note TEXT NOT NULL DEFAULT '',
+              UNIQUE(cycle_id,iteration));
+            CREATE UNIQUE INDEX IF NOT EXISTS one_install_run_slot ON cycle_slots((1))
+              WHERE status IN ('reserved','blocked');
+            CREATE TABLE IF NOT EXISTS pipeline_holds (id TEXT PRIMARY KEY, note TEXT NOT NULL);
             CREATE UNIQUE INDEX IF NOT EXISTS one_active_game ON jobs((1))
               WHERE status='running';
             """)
@@ -99,6 +130,390 @@ class Polygon:
 
     def host(self):
         return read(self.local / "config.json")
+
+    def register_cycle(self, path):
+        """Register separately verified human approval, never from submit()."""
+        path = Path(path).resolve()
+        approval = read(path)
+        if approval.get("schemaVersion") != 1 or not SAFE_ID.fullmatch(approval.get("id", "")):
+            raise ValueError("Cycle needs schemaVersion1 and safe id")
+        for key in ("sourceChat", "sourceThreadId", "subject", "profile", "scopeId", "task", "stopCriteria"):
+            required_string(approval, key)
+        if not isinstance(approval.get("allowedChanges"), list) or not approval["allowedChanges"]:
+            raise ValueError("Define allowedChanges")
+        if type(approval.get("maxIterations")) is not int or approval["maxIterations"] < 1:
+            raise ValueError("Positive finite maxIterations required")
+        owner_evidence(approval, path)
+        canonical = json.dumps(approval, sort_keys=True, ensure_ascii=False)
+        with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT authorization FROM cycles WHERE id=?", (approval["id"],)).fetchone()
+            if row:
+                if row["authorization"] != canonical:
+                    raise ValueError("Cycle id already registered with different approval")
+                return {"id": approval["id"], "duplicate": True}
+            con.execute("INSERT INTO cycles(id,authorization,status) VALUES(?,?,'active')", (approval["id"], canonical))
+        return {"id": approval["id"], "status": "active"}
+
+    def release_batch(self, path):
+        """Snapshot a ready batch only after the owner's manual start command."""
+        path = Path(path).resolve()
+        approval = read(path)
+        if approval.get("schemaVersion") != 1 or not SAFE_ID.fullmatch(approval.get("id", "")):
+            raise ValueError("Batch needs schemaVersion1 and safe id")
+        owner_evidence(approval, path, require_deadline=False)
+        ids = approval.get("orderIds")
+        if not isinstance(ids, list) or not ids or any(not isinstance(i, str) for i in ids) or len(set(ids)) != len(ids):
+            raise ValueError("List exact unique ready orderIds")
+        canonical = json.dumps(approval, sort_keys=True, ensure_ascii=False)
+        with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            existing = con.execute("SELECT authorization FROM releases WHERE id=?", (approval["id"],)).fetchone()
+            if existing:
+                if existing["authorization"] != canonical:
+                    raise ValueError("Batch id already used with different approval")
+                return {"id": approval["id"], "duplicate": True}
+            for job in ids:
+                row = con.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()
+                if not row or row["status"] != "queued" or json.loads(row["request"]).get("cycle") is not None:
+                    raise ValueError("Batch accepts ready standard automatic orders only")
+                if con.execute("SELECT id FROM released_orders WHERE id=?", (job,)).fetchone():
+                    raise ValueError("Order already belongs to a released batch")
+            con.execute("INSERT INTO releases VALUES(?,?)", (approval["id"], canonical))
+            for job in ids:
+                con.execute("INSERT INTO released_orders VALUES(?,?)", (job, approval["id"]))
+                self.event(con, job, "released", approval["id"])
+        return {"id": approval["id"], "releasedOrders": ids}
+
+    def cycle_state(self, cycle):
+        with self.connect() as con:
+            row = con.execute("SELECT * FROM cycles WHERE id=?", (cycle,)).fetchone()
+        if not row:
+            raise ValueError("Unknown cycle")
+        return dict(row)
+
+    def request_slot(self, path):
+        """Queue preparation intent without touching installed files or starting a game."""
+        path = Path(path).resolve()
+        request = read(path)
+        if request.get("schemaVersion") != 1:
+            raise ValueError("Slot needs schemaVersion1")
+        for key in ("id", "cycleId", "orderId"):
+            if not SAFE_ID.fullmatch(required_string(request, key)):
+                raise ValueError("Safe slot/cycle/order id required")
+        required_string(request, "sourceChat")
+        required_string(request, "sourceThreadId")
+        writes = request.get("writePaths")
+        if not isinstance(writes, list) or not writes or any(not isinstance(p, str) or not p.strip() for p in writes):
+            raise ValueError("Declare every planned install/profile writePath")
+        request["writePaths"] = [str((path.parent / p).resolve()) for p in writes]
+        canonical = json.dumps(request, sort_keys=True, ensure_ascii=False)
+        with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            duplicate = con.execute("SELECT request FROM cycle_slots WHERE id=?", (request["id"],)).fetchone()
+            if duplicate:
+                if duplicate["request"] != canonical:
+                    raise ValueError("Slot id reused with different content")
+                return {"id": request["id"], "duplicate": True}
+            row = con.execute("SELECT * FROM cycles WHERE id=? AND status='active'", (request["cycleId"],)).fetchone()
+            if not row:
+                raise ValueError("Slot needs independently authorized active cycle")
+            approval = json.loads(row["authorization"])
+            if time.time() >= approval["deadlineUtc"] or digest(approval["ownerAuthorization"]["path"]) != approval["ownerAuthorization"]["sha256"]:
+                raise ValueError("Slot approval expired or provenance changed")
+            for key in ("sourceChat", "sourceThreadId"):
+                if request[key] != approval[key]:
+                    raise ValueError("Slot origin mismatch")
+            iteration = request.get("iteration")
+            if type(iteration) is not int or not 1 <= iteration <= approval["maxIterations"]:
+                raise ValueError("Slot iteration limit")
+            previous = [j for j in con.execute("SELECT request,status FROM jobs")
+                        if (json.loads(j["request"]).get("cycle") or {}).get("id") == request["cycleId"]]
+            if len(previous) != iteration - 1 or any(j["status"] != "delivered" for j in previous):
+                raise ValueError("Slot needs delivered previous iterations without branches")
+            con.execute("INSERT INTO cycle_slots(id,cycle_id,iteration,order_id,request,status) VALUES(?,?,?,?,?,'waiting')",
+                        (request["id"], request["cycleId"], iteration, request["orderId"], canonical))
+        return {"id": request["id"], "status": "waiting"}
+
+    def slots(self):
+        with self.connect() as con:
+            return [dict(row) for row in con.execute("SELECT * FROM cycle_slots ORDER BY seq")]
+
+    def environment_idle(self):
+        self.executor()
+        from skyrim_autotest import native
+        names = {"skyrimvr.exe", "sksevr_loader.exe", "vrserver.exe", "vrmonitor.exe", "vrcompositor.exe",
+                 "vrstartup.exe", "vrdashboard.exe", "vrwebhelper.exe", "vrprismhost.exe"}
+        return not any(p["name"].lower() in names for p in native.processes())
+
+    def grant_slot(self):
+        with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            if con.execute("SELECT id FROM pipeline_holds").fetchone():
+                return {"status": "pipeline_held"}
+            existing = con.execute("SELECT * FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone()
+            if existing:
+                cycle = con.execute("SELECT * FROM cycles WHERE id=?", (existing["cycle_id"],)).fetchone()
+                approval = json.loads(cycle["authorization"])
+                if existing["status"] == "reserved" and (cycle["status"] != "active" or time.time() >= approval["deadlineUtc"]):
+                    # Never release a possibly half-installed environment on a timeout.
+                    con.execute("UPDATE cycle_slots SET status='blocked',note='Stopped/expired owner; installation review required' WHERE id=?", (existing["id"],))
+                    result = dict(existing)
+                    result["status"] = "blocked"
+                    return result
+                return dict(existing)
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone():
+                return {"status": "game_busy"}
+            # A manually released finite batch finishes before changing its installation.
+            if con.execute("SELECT jobs.id FROM jobs JOIN released_orders ON jobs.id=released_orders.id WHERE jobs.status='queued'").fetchone():
+                return {"status": "manual_batch_pending"}
+            if not con.execute("SELECT id FROM cycle_slots WHERE status='waiting'").fetchone():
+                return {"status": "idle"}
+            if not self.environment_idle():
+                return {"status": "external_game_or_vr_busy"}
+            for row in con.execute("SELECT * FROM cycle_slots WHERE status='waiting' ORDER BY seq").fetchall():
+                cycle = con.execute("SELECT * FROM cycles WHERE id=?", (row["cycle_id"],)).fetchone()
+                approval = json.loads(cycle["authorization"])
+                if cycle["status"] != "active" or time.time() >= approval["deadlineUtc"] or digest(approval["ownerAuthorization"]["path"]) != approval["ownerAuthorization"]["sha256"]:
+                    con.execute("UPDATE cycle_slots SET status='cancelled',note='Approval stopped/expired/changed' WHERE id=?", (row["id"],))
+                    continue
+                con.execute("UPDATE cycle_slots SET status='reserved' WHERE id=?", (row["id"],))
+                result = dict(row)
+                result["status"] = "reserved"
+                return result
+        return {"status": "idle"}
+
+    def pipeline_status(self):
+        with self.connect() as con:
+            return {"holds": [dict(r) for r in con.execute("SELECT * FROM pipeline_holds")],
+                    "slots": [dict(r) for r in con.execute("SELECT * FROM cycle_slots ORDER BY seq")],
+                    "activeOrders": [r["id"] for r in con.execute("SELECT id FROM jobs WHERE status='running'")]}
+
+    def hold_pipeline(self, issue, note):
+        if not isinstance(note, str) or not note.strip():
+            raise ValueError("Pipeline hold needs evidence/reason")
+        with self.connect() as con:
+            con.execute("INSERT OR IGNORE INTO pipeline_holds VALUES(?,?)", (issue, note))
+        return {"id": issue, "status": "held"}
+
+    def clear_pipeline(self, issue, path):
+        path = Path(path).resolve()
+        evidence = read(path)
+        owner_evidence(evidence, path, require_deadline=False)
+        if evidence.get("holdId") != issue or evidence.get("installationSettled") is not True:
+            raise ValueError("Exact hold and reviewed shared environment required")
+        with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone():
+                raise ValueError("Recover active session before pipeline clearance")
+            con.execute("DELETE FROM pipeline_holds WHERE id=?", (issue,))
+            self.event(con, issue, "pipeline_cleared", json.dumps(evidence, sort_keys=True))
+        return {"id": issue, "status": "cleared"}
+
+    def slot_notified(self, slot, receipt):
+        if not isinstance(receipt, str) or not receipt.strip():
+            raise ValueError("Successful exact-origin app grant receipt required")
+        with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM cycle_slots WHERE id=?", (slot,)).fetchone()
+            if not row or row["status"] != "reserved":
+                raise ValueError("No reserved slot")
+            cycle = con.execute("SELECT * FROM cycles WHERE id=?", (row["cycle_id"],)).fetchone()
+            approval = json.loads(cycle["authorization"])
+            if cycle["status"] != "active" or time.time() >= approval["deadlineUtc"]:
+                raise ValueError("Preparation grant expired or cycle stopped")
+            if row["receipt"]:
+                return {"id": slot, "duplicate": True}
+            con.execute("UPDATE cycle_slots SET receipt=? WHERE id=?", (receipt, slot))
+        return {"id": slot, "status": "notified"}
+
+    def clear_slot(self, slot, path):
+        """Owner-reviewed installation/recovery clearance, never timeout expiry."""
+        path = Path(path).resolve()
+        clearance = read(path)
+        owner_evidence(clearance, path, require_deadline=False)
+        if clearance.get("slotId") != slot or clearance.get("installationSettled") is not True:
+            raise ValueError("Exact slot and settled installation evidence required")
+        with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM cycle_slots WHERE id=?", (slot,)).fetchone()
+            if not row:
+                raise ValueError("Unknown slot")
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone():
+                raise ValueError("Recover active game before clearing installation slot")
+            order = con.execute("SELECT status FROM jobs WHERE id=?", (row["order_id"],)).fetchone()
+            if order and order["status"] == "queued":
+                raise ValueError("Withdraw/reconcile submitted order before clearance")
+            con.execute("UPDATE cycle_slots SET status='released',note=? WHERE id=?",
+                        (json.dumps(clearance, sort_keys=True), slot))
+        return {"id": slot, "status": "released"}
+
+    def stop_cycle(self, cycle, status, note):
+        if status not in ("cancelled", "complete", "blocked") or not isinstance(note, str) or not note.strip():
+            raise ValueError("Terminal cycle status and reason required")
+        with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT status FROM cycles WHERE id=?", (cycle,)).fetchone()
+            if not row:
+                raise ValueError("Unknown cycle")
+            if row["status"] != "active":
+                if row["status"] != status:
+                    raise ValueError("Stopped cycles cannot be reopened or relabelled")
+                return {"id": cycle, "duplicate": True}
+            con.execute("UPDATE cycles SET status=?,note=? WHERE id=?", (status, note, cycle))
+        return {"id": cycle, "status": status, "notice": "No new launches; active session still requires native recovery/restoration"}
+
+    def validate_cycle(self, con, order):
+        cycle = order.get("cycle")
+        if cycle is None:
+            return
+        if not isinstance(cycle, dict):
+            raise ValueError("cycle must reference a separately registered approval")
+        if con.execute("SELECT id FROM jobs WHERE status='running' AND id != ?", (order["id"],)).fetchone():
+            raise ValueError("Active session/recovery stops cycle admission")
+        row = con.execute("SELECT * FROM cycles WHERE id=?", (required_string(cycle, "id"),)).fetchone()
+        if not row or row["status"] != "active":
+            raise ValueError("Cycle is not separately authorized and active")
+        approval = json.loads(row["authorization"])
+        if time.time() >= approval["deadlineUtc"]:
+            raise ValueError("Cycle deadline reached")
+        evidence = approval["ownerAuthorization"]
+        if digest(evidence["path"]) != evidence["sha256"]:
+            raise ValueError("Owner authorization provenance changed")
+        for key in ("sourceChat", "sourceThreadId", "subject"):
+            if order[key] != approval[key]:
+                raise ValueError("Cycle scope/origin mismatch: " + key)
+        if order["profile"] != approval["profile"] and order.get("profileSelection", {}).get("mode") != "exclusive":
+            raise ValueError("Cycle baseline profile mismatch")
+        if order["mode"] != "automatic" or cycle.get("scopeId") != approval["scopeId"]:
+            raise ValueError("Cycle requires authorized automatic scope")
+        iteration = cycle.get("iteration")
+        if type(iteration) is not int or not 1 <= iteration <= approval["maxIterations"]:
+            raise ValueError("Cycle iteration limit reached or invalid")
+        required_string(cycle, "buildId")
+        slot = con.execute("SELECT * FROM cycle_slots WHERE id=? AND status='reserved'", (required_string(cycle, "slotId"),)).fetchone()
+        if not slot or (slot["cycle_id"], slot["iteration"], slot["order_id"]) != (cycle["id"], iteration, order["id"]):
+            raise ValueError("Cycle order requires its exclusive install/run slot")
+        if not slot["receipt"]:
+            raise ValueError("Slot grant must have an exact-origin delivery receipt")
+        previous_rows = []
+        for job in con.execute("SELECT * FROM jobs WHERE id != ?", (order["id"],)):
+            request = json.loads(job["request"])
+            if isinstance(request.get("cycle"), dict) and request["cycle"].get("id") == cycle["id"]:
+                previous_rows.append((job, request))
+        if len(previous_rows) != iteration - 1:
+            raise ValueError("Cycle iterations must form one nonbranching chain")
+        if iteration == 1:
+            if any(cycle.get(k) is not None for k in ("previousOrderId", "previousPacketSha256", "decision")):
+                raise ValueError("First iteration cannot claim a predecessor")
+            return
+        previous, request = max(previous_rows, key=lambda pair: pair[1]["cycle"]["iteration"])
+        if cycle.get("previousOrderId") != previous["id"] or previous["status"] != "delivered":
+            raise ValueError("Previous iteration must be delivered to its exact origin")
+        if digest(previous["packet"]) != cycle.get("previousPacketSha256"):
+            raise ValueError("Previous packet provenance mismatch")
+        packet = read(previous["packet"])
+        if packet.get("restored") is not True or packet["executionOutcome"] not in ("passed", "failed"):
+            raise ValueError("Blocked/interrupted/unrestored result stops the cycle")
+        names = {Path(entry["path"]).name for entry in packet["files"]}
+        if not {"self-checks.json", "profile-archive.json"} <= names:
+            raise ValueError("Required tooling/profile lifecycle evidence missing")
+        for entry in packet["files"]:
+            if digest(entry["path"]) != entry["sha256"] or Path(entry["path"]).stat().st_size != entry["bytes"]:
+                raise ValueError("Evidence manifest mismatch")
+            if Path(entry["path"]).name == "self-checks.json" and read(entry["path"]).get("findings"):
+                raise ValueError("Tooling/recovery findings stop the cycle")
+            if Path(entry["path"]).name == "profile-archive.json":
+                archive = read(entry["path"])
+                if Path(archive["originalProfile"]).exists():
+                    raise ValueError("Temporary profile remains in MO2")
+                for pin in archive["files"]:
+                    if digest(pin["path"]) != pin["sha256"]:
+                        raise ValueError("Archived profile/save evidence changed")
+            if Path(entry["path"]).name == "service-findings.jsonl":
+                notes = [json.loads(line) for line in Path(entry["path"]).read_text(encoding="utf-8").splitlines() if line.strip()]
+                if any(n.get("category") in ("tool_bug", "tool_suspected_bug") for n in notes):
+                    raise ValueError("Tooling problems stop the cycle")
+        decision = cycle.get("decision")
+        if not isinstance(decision, dict) or not SHA.fullmatch(decision.get("sha256", "")) or digest(required_string(decision, "path")) != decision["sha256"]:
+            raise ValueError("Pinned origin analysis decision required")
+        analysis = read(decision["path"])
+        if (analysis.get("cycleId"), analysis.get("previousOrderId"), analysis.get("previousPacketSha256"), analysis.get("sourceThreadId"), analysis.get("action")) != (cycle["id"], previous["id"], cycle["previousPacketSha256"], order["sourceThreadId"], "fix-and-retest"):
+            raise ValueError("Decision must analyze this exact predecessor for fix-and-retest")
+        required_string(analysis, "reason")
+        if any(analysis.get(key) is not True for key in ("withinScope", "evidenceComplete", "toolingHealthy", "criteriaUnmet")):
+            raise ValueError("Uncertain evidence/tooling/scope or fulfilled criteria stops the cycle")
+        if cycle["buildId"] == request["cycle"]["buildId"] or sorted(p["sha256"] for p in order["inputs"]) == sorted(p["sha256"] for p in request["inputs"]):
+            raise ValueError("Fix iteration requires a new build id and installed input hashes")
+
+    def check_launch_authorization(self, order):
+        with self.connect() as con:
+            if con.execute("SELECT id FROM pipeline_holds").fetchone():
+                raise ValueError("Shared tooling/recovery pipeline is held for owner review")
+            slot = con.execute("SELECT * FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone()
+            if slot and (slot["status"] == "blocked" or slot["order_id"] != order["id"]):
+                raise ValueError("Another installation/run slot owns the shared environment")
+            if order.get("cycle") is not None:
+                self.validate_cycle(con, order)
+            else:
+                row = con.execute("SELECT authorization FROM releases JOIN released_orders ON releases.id=release_id WHERE released_orders.id=?", (order["id"],)).fetchone()
+                if not row:
+                    raise ValueError("Standard order awaits the owner's manual batch start")
+                approval = json.loads(row["authorization"])
+                evidence = approval["ownerAuthorization"]
+                deadline = approval.get("deadlineUtc")
+                if (deadline is not None and time.time() >= deadline) or digest(evidence["path"]) != evidence["sha256"]:
+                    raise ValueError("Manual batch start expired or provenance changed")
+            self.validate_profile_selection(order)
+
+    @staticmethod
+    def validate_profile_selection(order):
+        selection = order.get("profileSelection", {"mode": "active"})
+        if not isinstance(selection, dict) or selection.get("mode") not in ("active", "exclusive"):
+            raise ValueError("Profile selection must be active or exclusive")
+        if selection["mode"] == "active":
+            return
+        required_string(selection, "reason")
+        if selection.get("authority") == "cycle-origin":
+            if not isinstance(order.get("cycle"), dict):
+                raise ValueError("Origin-selected exclusive profile requires an authorized full cycle")
+        elif selection.get("authority") == "owner":
+            evidence = selection.get("ownerAuthorization")
+            if not isinstance(evidence, dict):
+                raise ValueError("Exclusive standard profile requires direct owner evidence")
+            for key in ("threadId", "messageId", "quote", "path", "verifiedBy"):
+                required_string(evidence, key)
+            if not SHA.fullmatch(evidence.get("sha256", "")) or digest(evidence["path"]) != evidence["sha256"]:
+                raise ValueError("Exclusive profile owner provenance mismatch")
+            if evidence["quote"] not in Path(evidence["path"]).read_text(encoding="utf-8-sig"):
+                raise ValueError("Exclusive profile owner quote absent")
+        else:
+            raise ValueError("Exclusive profile needs owner or cycle-origin authority")
+
+    def source_profile(self, order, runner):
+        """Read actual MO2 selection; the runner creates/activates its own copy."""
+        self.validate_profile_selection(order)
+        if order.get("profileSelection", {}).get("mode") == "exclusive":
+            selected = order["profile"]
+        elif any(p["name"].lower() == "modorganizer.exe" for p in runner.native.processes()):
+            selected = runner.request(runner.P.bridge_port, "ping", token=runner.P.bridge_token.read_text().strip())["profile"]
+        else:
+            text = runner.P.mo2_ini.read_text(encoding="utf-8-sig")
+            values = re.findall(r"(?m)^selected_profile=(.*?)\r?$", text)
+            if len(values) != 1:
+                raise ValueError("Actual active MO2 profile is unavailable/ambiguous")
+            selected = values[0]
+            if selected.startswith("@ByteArray(") and selected.endswith(")"):
+                selected = selected[len("@ByteArray("):-1]
+            # QSettings escaped strings need a real bridge read, not a guessed decode.
+            if "\\" in selected or selected.startswith("@"):
+                raise ValueError("Read the active MO2 profile through its bridge; unsupported INI encoding")
+        if selected != order["profile"] or Path(selected).name != selected or selected in (".", ".."):
+            raise ValueError("Active profile differs from order provenance; prepare a new order")
+        write(self.evidence_dir(order["id"]) / "profile-selection.json",
+              {"sourceProfile": selected, "selection": order.get("profileSelection", {"mode": "active"}),
+               "copyOwner": "skyrim-autotest", "originalProfilePreserved": True})
+        return selected
 
     def executor(self):
         location = Path(self.host()["executor"]).resolve()
@@ -156,6 +571,12 @@ class Polygon:
                     raise ValueError("Assisted observations cannot mutate the game")
             if not isinstance(order.get("playerSteps"), list) or not order["playerSteps"]:
                 raise ValueError("Assisted mode needs playerSteps")
+        if isinstance(order.get("cycle"), dict) and isinstance(order["cycle"].get("decision"), dict):
+            decision = order["cycle"]["decision"]
+            decision["path"] = str((path.parent / required_string(decision, "path")).resolve())
+        if isinstance(order.get("profileSelection"), dict) and isinstance(order["profileSelection"].get("ownerAuthorization"), dict):
+            evidence = order["profileSelection"]["ownerAuthorization"]
+            evidence["path"] = str((path.parent / required_string(evidence, "path")).resolve())
         canonical = json.dumps(order, ensure_ascii=False, sort_keys=True)
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -164,6 +585,8 @@ class Polygon:
                 if previous["request"] != canonical:
                     raise ValueError("Order id already used for different content; create a new id")
                 return {"id": order["id"], "duplicate": True}
+            self.validate_cycle(con, order)
+            self.validate_profile_selection(order)
             status = "queued" if order["mode"] == "automatic" else "waiting_player"
             con.execute("INSERT INTO jobs(id,mode,subject,origin,status,submitted,request) VALUES(?,?,?,?,?,?,?)",
                         (order["id"], order["mode"], order["subject"], order["sourceChat"], status, time.time(), canonical))
@@ -180,12 +603,24 @@ class Polygon:
     def claim(self, mode="automatic", job=None):
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            if con.execute("SELECT id FROM pipeline_holds").fetchone():
+                return None
             if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone():
                 return None
             if job:
+                if con.execute("SELECT id FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone():
+                    return None
                 row = con.execute("SELECT * FROM jobs WHERE id=? AND mode=? AND status='waiting_player'", (job, mode)).fetchone()
             else:
-                row = con.execute("SELECT * FROM jobs WHERE mode=? AND status='queued' ORDER BY submitted,id LIMIT 1", (mode,)).fetchone()
+                row = None
+                slot = con.execute("SELECT * FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone()
+                for candidate in con.execute("SELECT * FROM jobs WHERE mode=? AND status='queued' ORDER BY submitted,id", (mode,)).fetchall():
+                    if slot and (slot["status"] == "blocked" or slot["order_id"] != candidate["id"]):
+                        continue
+                    request = json.loads(candidate["request"])
+                    if request.get("cycle") is not None or con.execute("SELECT id FROM released_orders WHERE id=?", (candidate["id"],)).fetchone():
+                        row = candidate
+                        break
             if not row:
                 return None
             con.execute("UPDATE jobs SET status='running',note='' WHERE id=?", (row["id"],))
@@ -225,6 +660,25 @@ class Polygon:
             result = read(Path(run) / "result.json")
             if result.get("restored") is not True or result.get("restoreErrors"):
                 findings.append({"component": "skyrim-autotest", "kind": "restoration_unverified", "details": result.get("restoreErrors"), "confirmed": True})
+        order = json.loads(self.get(job)["request"])
+        if order.get("cycle"):
+            try:
+                if not run:
+                    raise ValueError("No run lifecycle evidence")
+                state = read(Path(run) / "state.json")
+                archive = Path(state["profileArchive"]).resolve()
+                original = Path(state["testProfile"]).resolve()
+                if (state.get("order", {}).get("id") != job or state.get("done") is not True or
+                    state.get("restored") is not True or archive != (Path(run) / "test-profile").resolve() or
+                    not archive.is_dir() or original.exists()):
+                    raise ValueError("Run/profile archive ownership or restoration unverified")
+                pins = [{"path": str(p.resolve()), "sha256": digest(p), "bytes": p.stat().st_size}
+                        for p in sorted(archive.rglob("*")) if p.is_file()]
+                if not pins:
+                    raise ValueError("Profile archive is empty")
+                write(folder / "profile-archive.json", {"originalProfile": str(original), "archive": str(archive), "files": pins})
+            except (KeyError, OSError, ValueError) as error:
+                findings.append({"component": "skyrim-autotest", "kind": "profile_archive_unverified", "details": str(error), "confirmed": True})
         observer_samples = []
         sources = ([Path(run) / "steps.jsonl"] if run else []) + [folder / "observations.jsonl"]
         def quality(value, path="", depth=0):
@@ -271,6 +725,11 @@ class Polygon:
         if row["packet"]:
             packet = read(row["packet"])
             self.finish(job, packet["executionOutcome"], packet["reason"], packet["runDirectory"], packet["restored"])
+        if category in ("tool_bug", "tool_suspected_bug"):
+            self.hold_pipeline(job, "Shared tooling finding: " + text)
+            cycle = json.loads(row["request"]).get("cycle")
+            if cycle and self.cycle_state(cycle["id"])["status"] == "active":
+                self.stop_cycle(cycle["id"], "blocked", "Tooling finding in " + job)
         return {"id": job, "recorded": str(folder / name)}
 
     def finish(self, job, outcome, note, run=None, restored=None):
@@ -278,7 +737,7 @@ class Polygon:
         order = json.loads(row["request"])
         folder = self.evidence_dir(job)
         folder.mkdir(parents=True, exist_ok=True)
-        self.self_checks(job, run)
+        findings = self.self_checks(job, run)
         files = []
         roots = [folder] + ([Path(run)] if run else [])
         # Do not expose snapshot backups, credentials or private save copies.
@@ -292,12 +751,24 @@ class Polygon:
                   "reason": note, "runDirectory": str(run) if run else None,
                   "restored": restored, "files": files, "requestedData": order["collect"],
                   "analysis": None, "finishedAt": time.time()}
+        packet["sourceProfile"] = order["profile"]
+        if order.get("cycle") is not None:
+            packet["cycle"] = order["cycle"]
         packet_path = folder / "packet.json"
         write(packet_path, packet)
         with self.connect() as con:
             status = "blocked" if outcome == "blocked" else "recorded"
             con.execute("UPDATE jobs SET status=?,packet=?,note=? WHERE id=?", (status, str(packet_path), note, job))
             self.event(con, job, status, note)
+            if order.get("cycle") and (outcome not in ("passed", "failed") or restored is not True or findings):
+                con.execute("UPDATE cycles SET status='blocked',note=? WHERE id=? AND status='active'",
+                            ("Execution/tooling/restoration requires owner review: " + job, order["cycle"]["id"]))
+            if order.get("cycle"):
+                healthy = outcome in ("passed", "failed") and restored is True and not findings
+                con.execute("UPDATE cycle_slots SET status=?,note=? WHERE order_id=? AND status='reserved'",
+                            ("released" if healthy else "blocked", "Restored run complete" if healthy else "Installation/recovery review required", job))
+            if findings:
+                con.execute("INSERT OR IGNORE INTO pipeline_holds VALUES(?,?)", (job, "Shared executor/restoration/profile evidence requires review"))
         return packet
 
     def reconcile(self):
@@ -326,6 +797,7 @@ class Polygon:
         folder.mkdir(parents=True, exist_ok=True)
         write(folder / "request.json", order)
         try:
+            self.check_launch_authorization(order)
             self.verify_inputs(order)
             write(folder / "executor-pins.json", self.runtime_pins(order))
             write(folder / "config.json", order["resolvedConfig"])
@@ -352,6 +824,7 @@ class Polygon:
         with self.connect() as con:
             con.execute("INSERT INTO attempts(id,started) VALUES(?,?)", (job, time.time()))
         order = json.loads(row["request"])
+        self.check_launch_authorization(order)
         self.verify_inputs(order)
         for pin in read(self.evidence_dir(job) / "executor-pins.json"):
             if digest(pin["path"]) != pin["sha256"]:
@@ -360,7 +833,7 @@ class Polygon:
         from skyrim_autotest import runner
         from skyrim_autotest.config import load
         runner.configure(load(self.evidence_dir(job) / "config.json"))
-        return runner.run(order["profile"], self.evidence_dir(job) / "scenario.json",
+        return runner.run(self.source_profile(order, runner), self.evidence_dir(job) / "scenario.json",
                           restart_idle_mo2=True, order={"id": job, "owner": order["sourceChat"]})
 
     def recover_active(self):
@@ -508,23 +981,40 @@ class Polygon:
         out = []
         for row in rows:
             packet = read(row["packet"])
-            out.append({"orderId": row["id"], "threadId": packet["sourceThreadId"],
-                        "sourceChat": packet["sourceChat"], "packet": row["packet"],
-                        "text": f"Skyrim-Polygon order {row['id']}: {packet['executionOutcome']}. Raw evidence packet: {row['packet']}. No mod diagnosis performed; analyze in the originating chat."})
+            order = json.loads(row["request"])
+            if any(packet[k] != order[k] for k in ("sourceChat", "sourceThreadId")) or packet["orderId"] != row["id"]:
+                raise ValueError("Packet origin/order mismatch; delivery refused")
+            out.append({"orderId": row["id"], "threadId": order["sourceThreadId"],
+                        "sourceChat": order["sourceChat"], "packet": row["packet"], "packetSha256": digest(row["packet"]),
+                        "text": f"Skyrim-Polygon order {row['id']}: {packet['executionOutcome']}. Raw evidence packet: {row['packet']}. Read and analyze once in the originating chat. This notification alone does not authorize fixes or a new test; continuing requires a separately owner-authorized active cycle."})
         return out
 
     def delivered(self, job, receipt):
-        row = self.get(job)
-        if row["status"] not in ("recorded", "blocked", "delivered"):
-            raise ValueError("No result to deliver")
+        if not isinstance(receipt, str) or not receipt.strip():
+            raise ValueError("Verified delivery receipt required")
         with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()
+            if not row or row["status"] not in ("recorded", "blocked", "delivered"):
+                raise ValueError("No result to deliver")
+            if row["status"] == "delivered":
+                return {"id": job, "duplicate": True}
             con.execute("UPDATE jobs SET status='delivered',delivery=? WHERE id=?", (receipt, job))
             self.event(con, job, "delivered", receipt)
+        return {"id": job, "status": "delivered"}
 
     def board(self):
         with self.connect() as con:
-            rows = con.execute("SELECT id,mode,subject,origin,status,submitted,note,packet,delivery FROM jobs ORDER BY submitted DESC").fetchall()
-        return [dict(row) for row in rows]
+            rows = con.execute("SELECT * FROM jobs ORDER BY submitted DESC").fetchall()
+            result = []
+            for row in rows:
+                item = {k: row[k] for k in ("id", "mode", "subject", "origin", "status", "submitted", "note", "packet", "delivery")}
+                cycle = json.loads(row["request"]).get("cycle")
+                item["workflow"] = "full-cycle" if cycle is not None else "standard"
+                item["cycleId"] = cycle["id"] if isinstance(cycle, dict) else None
+                item["awaitingOwnerStart"] = row["mode"] == "automatic" and row["status"] == "queued" and cycle is None and not con.execute("SELECT id FROM released_orders WHERE id=?", (row["id"],)).fetchone()
+                result.append(item)
+        return result
 
     def serve(self, port):
         polygon = self
@@ -554,6 +1044,33 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     submit = sub.add_parser("submit")
     submit.add_argument("order", type=Path)
+    register = sub.add_parser("cycle-register", help="Only after verifying a direct owner start; never inferred from an order")
+    register.add_argument("authorization", type=Path)
+    batch = sub.add_parser("batch-release", help="Only after the owner asks Polygon to start prepared standard orders")
+    batch.add_argument("authorization", type=Path)
+    ticket = sub.add_parser("slot-request")
+    ticket.add_argument("request", type=Path)
+    for name in ("slots", "slot-next"):
+        sub.add_parser(name)
+    sub.add_parser("pipeline-status")
+    hold = sub.add_parser("pipeline-hold")
+    hold.add_argument("id")
+    hold.add_argument("--note", required=True)
+    clear = sub.add_parser("pipeline-clear")
+    clear.add_argument("id")
+    clear.add_argument("evidence", type=Path)
+    notified = sub.add_parser("slot-notified")
+    notified.add_argument("id")
+    notified.add_argument("--note", required=True)
+    clearance = sub.add_parser("slot-clear")
+    clearance.add_argument("id")
+    clearance.add_argument("evidence", type=Path)
+    state = sub.add_parser("cycle-show")
+    state.add_argument("id")
+    stop = sub.add_parser("cycle-stop")
+    stop.add_argument("id")
+    stop.add_argument("--status", choices=["cancelled", "complete", "blocked"], required=True)
+    stop.add_argument("--note", required=True)
     for name in ("board", "next", "reconcile", "outbox", "recover-active"):
         sub.add_parser(name)
     for name in ("show", "assisted-start", "assisted-poll", "assisted-finish", "_execute", "delivered"):
@@ -573,6 +1090,18 @@ def main(argv=None):
     try:
         polygon = Polygon(session_root(args.root))
         if args.command == "submit": result = polygon.submit(args.order)
+        elif args.command == "cycle-register": result = polygon.register_cycle(args.authorization)
+        elif args.command == "batch-release": result = polygon.release_batch(args.authorization)
+        elif args.command == "slot-request": result = polygon.request_slot(args.request)
+        elif args.command == "slots": result = polygon.slots()
+        elif args.command == "slot-next": result = polygon.grant_slot()
+        elif args.command == "pipeline-status": result = polygon.pipeline_status()
+        elif args.command == "pipeline-hold": result = polygon.hold_pipeline(args.id, args.note)
+        elif args.command == "pipeline-clear": result = polygon.clear_pipeline(args.id, args.evidence)
+        elif args.command == "slot-notified": result = polygon.slot_notified(args.id, args.note)
+        elif args.command == "slot-clear": result = polygon.clear_slot(args.id, args.evidence)
+        elif args.command == "cycle-show": result = polygon.cycle_state(args.id)
+        elif args.command == "cycle-stop": result = polygon.stop_cycle(args.id, args.status, args.note)
         elif args.command == "board": result = polygon.board()
         elif args.command == "show": result = polygon.get(args.id)
         elif args.command == "next": result = polygon.execute_next()
