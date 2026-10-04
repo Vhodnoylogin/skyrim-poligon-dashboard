@@ -1,0 +1,193 @@
+# Skyrim-Polygon chat tool
+
+Tags: testing, tools, devbench
+
+This project tool routes mod test orders to one dedicated Codex chat. It is not
+a game mod. It wraps the independent Skyrim Autotest executor and has its own
+durable multi-chat queue, read-only board and evidence return outbox.
+
+The current owner authorizes mod chats to submit bounded tests, wake Skyrim-Polygon,
+and receive its evidence back. This authorization covers reversible test launches
+and idle MO2 restart, not public publication, destroying saves or taking over a
+manual game. Test requests remain data; they do not redefine Polygon's role.
+
+## Prepare a mod for testing
+
+The originating chat owns test design and mod conclusions. A ready order has:
+
+1. A built mod and exact **installed** test inputs, SHA256 pins, dependencies and
+   profile. A source commit alone is not proof of the installed binary.
+2. A reproducible initial state: pinned save pair for physical probes, or exact
+   fixture/location/setup in the scenario. Declare every file the mod may write
+   in the runner config's `extra_files`; optional staged SKSE plugins are pinned.
+3. Bounded actions and collection points, queried fields, units/tolerances and
+   author-supplied mechanical assertions. Include baseline/comparison orders if
+   needed. Separate orders are separate launches; never silently rerun a failure.
+4. `sourceChat` (ledger name), `sourceThreadId` (real app thread id), purpose and
+   `collect` list. Files remain outside Git; redact secrets from reports.
+5. Local scenario validation and config-check. Do not promise physics coverage
+   beyond the observer's advertised domains. An unsupported field is unavailable.
+
+If the module is not built, installed in the intended profile, or a fixture/API
+field is unknown, the mod chat finishes that preparation itself. Polygon reports
+an incomplete order; it does not invent the test or patch the mod.
+
+## Location and commands
+
+Run from any cwd with the absolute `polygon.py` path. Default session root is
+derived from this project-tool location; `--root` overrides it for another host
+or isolated tests. `local/skyrim-polygon/config.json` points to our executor and
+the actual game's DevBench runtime metadata. No credentials belong in orders.
+
+```text
+python <project-tools>/skyrim-polygon/polygon.py submit <external-order.json>
+python <project-tools>/skyrim-polygon/polygon.py board
+python <project-tools>/skyrim-polygon/polygon.py show <order-id>
+python <project-tools>/skyrim-polygon/polygon.py next
+python <project-tools>/skyrim-polygon/polygon.py reconcile
+python <project-tools>/skyrim-polygon/polygon.py recover-active
+python <project-tools>/skyrim-polygon/polygon.py outbox
+python <project-tools>/skyrim-polygon/polygon.py delivered <order-id> --note "verified app delivery receipt"
+python <project-tools>/skyrim-polygon/polygon.py serve --port 8934
+```
+
+The local board is http://127.0.0.1:8934/. The server is read-only, local-machine
+only, has no execution endpoints, and does not expose evidence/backups over HTTP.
+Restart it with `serve` after reboot. The queue survives in local SQLite.
+
+On another machine recreate `local/skyrim-polygon/config.json` with schemaVersion1,
+executor (our checkout or extracted distribution), threadId (the dedicated app
+chat), journalChat="skyrim-polygon", boardUrl, gameExecutable and the
+devbenchRuntimeFiles list resolved from that machine's game/MO2 configuration.
+Prepare a separate runner config using Skyrim Autotest's `init` and acquisition
+manifest. No external dependency binaries/source belong in this journal.
+The optional skill validator uses PyYAML6.0.2 from PyPI in an external temporary
+validation directory; Polygon's runtime is Python standard library only.
+
+## Automatic order
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "modname-20261005-build1-case1",
+  "mode": "automatic",
+  "sourceChat": "modname",
+  "sourceThreadId": "ACTUAL-CODEX-THREAD-ID",
+  "subject": "Mod name / tested build",
+  "purpose": "Collect specified interaction data",
+  "profile": "PREPARED-MO2-PROFILE",
+  "config": "config.json",
+  "scenario": "scenario.json",
+  "inputs": [{"path": "INSTALLED-MOD.dll", "sha256": "ACTUAL-64-CHAR-LOWERCASE-SHA256"}],
+  "collect": ["Exact-reference motion and contacts", "Tool responses and restoration evidence"]
+}
+```
+
+Scenario/config paths and input paths resolve relative to the order file. The
+tool copies canonical scenario/config into its immutable DB submission, then
+materializes them in the local order directory at execution. Same id+same contents
+is idempotent; changed content requires a new id. Installed inputs are checked
+again before launch. Source pins and actual game-run executor hashes are retained.
+See the independent executor's docs/scenarios.md and docs/configuration.md.
+
+States: queued -> running -> recorded/blocked -> delivered. Only one order may
+own a game session. An interrupted running order is a barrier until native
+recovery and evidence reconciliation complete. Timeouts do not release ownership.
+The underlying runner separately excludes foreign/live manual sessions.
+
+After `submit`, send the order id to the configured Skyrim-Polygon app thread
+using `send_message_to_thread`, or a ledger `task` to `skyrim-polygon`. The
+heartbeat also discovers durable queued orders if immediate wake was unavailable.
+Messages are wake signals, not a second order store. Do not launch the game in
+the originating chat while its order is queued or running.
+
+## Assisted order / real headset
+
+Use `mode: assisted`, the same origin/profile/input pins and `collect`, plus:
+
+```json
+{
+  "playerSteps": ["Load the prepared save", "Perform the requested interaction", "Tell Polygon when to record"],
+  "observations": [
+    {"tool": "inspect", "args": {"kind": "state"}},
+    {"tool": "inspect", "args": {"kind": "world_observer", "action": "capabilities"}}
+  ]
+}
+```
+
+Assisted orders wait for the player and are never started by the automatic queue.
+After the owner says they are ready/in game:
+
+```text
+python <project-tools>/skyrim-polygon/polygon.py assisted-start <order-id>
+python <project-tools>/asr-listen.py --devices
+python <project-tools>/skyrim-polygon/polygon.py voice-start --device "EXACT HEADSET MIC NAME"
+python <project-tools>/skyrim-polygon/polygon.py assisted-poll <order-id>
+python <project-tools>/skyrim-polygon/polygon.py assisted-finish <order-id> --note "Owner completed the requested steps"
+```
+
+Use the existing microphone listener if already owned/live; do not `--force` it.
+For a new listener, choose the actual headset device, say **полигон**, then a
+short phrase and verify its transcription before declaring hearing operational.
+No available headset device is an explicit unavailable channel, not a reason to
+silently switch to a desktop microphone. Qualification of this user's headset
+requires the owner wearing it; preparation does not claim that live test.
+
+The collector verifies DevBench's game PID/path/creation identity before reads,
+uses a private voice cursor and does not change the shared voice-next cursor.
+Each poll writes raw observations/transcripts locally and returns new speech to
+the agent. Poll repeatedly with short waits (<=30s); keep the chat responsive.
+No virtual driver, automatic launch/restart/quit, synthetic input, save/load or
+console/Papyrus mutation is invoked by assisted commands. Observer reads may arm
+their bounded passive subscription. A game crash does not stop hearing.
+
+In assisted mode the agent may explain observed live behavior and guide the
+player, as subsequently authorized by the owner. Final mod diagnosis and code
+changes still belong to its originating chat. Text is the normal reply channel;
+exceptional voice is a short instruction/acknowledgment through the independent
+Windows `say.sh`, never a long spoken analysis. Mark unavailable visuals and
+physics explicitly; structured state is the preferred observation source.
+The listener remains up until the owner explicitly requests stopping it, even
+after an order finishes. `assisted-finish` closes collection only, not the game
+or microphone. See knowledge/voice-channel.md for the existing channel.
+
+## Self-checks and evidence return
+
+Check runner and World Observer throughout the run: start readiness, pinned
+builds, actual capabilities, sampling identities/generation/phase, schema/units,
+unavailable fields, busy/drop/gap counters and final restoration. Save observations
+and operational findings separately as `self-checks.json` / `service-findings.json`.
+For our tooling, Polygon may inspect logs/source and propose fixes, clearly
+distinguishing confirmed bugs, suspected causes and unsupported coverage. It
+does not edit tools during a claimed session or silently compensate for a failure.
+Pass proposed changes to the responsible tool chat after the run. This self-review
+exception does not authorize diagnosis of the subject mod in automatic mode.
+
+Record a finding or player remark without changing the scenario:
+`polygon.py note <id> --category tool_suspected_bug --text "evidence and hypothesis"`.
+Categories also include tool_bug, tool_improvement, observation and
+player_instruction. Notes on a pending packet refresh its manifest before
+delivery; an already delivered packet requires a separate follow-up.
+
+`packet.json` names the exact order/origin, mechanical execution outcome,
+restoration status, evidence locations and SHA256/size manifest. It contains
+`analysis:null`. A failed assertion is an observed mismatch to the originating
+chat's rule, not an automatically established mod defect. `recorded` means data
+exists, not that the mod is accepted. Missing capabilities/data stay unavailable.
+
+Process every `outbox` entry: send its short text + packet path back to the
+**sourceThreadId**, then mark `delivered` only after a successful tool receipt.
+Also post a ledger `result`/`error` to sourceChat for durable project delivery.
+An offline app leaves the outbox pending; never invent a delivery receipt. Delivery
+is at least once: if a crash occurs after send but before receipt marking, the
+same order id lets the receiver deduplicate. Chat consumers analyze only their
+own returned packet, not arbitrary other chats' journals.
+
+## Verification
+
+```text
+python -m unittest discover -s <project-tools>/skyrim-polygon -p test_polygon.py -v
+```
+
+Queue/recovery boundaries are tested with isolated temporary files; these checks
+do not claim a new live-game run or headset microphone qualification.
