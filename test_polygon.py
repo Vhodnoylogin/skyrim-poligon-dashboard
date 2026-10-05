@@ -547,6 +547,44 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "profile/save evidence"):
             self.automatic_submit(cycle)
 
+    def scenario_correction(self):
+        cycle = self.completed_cycle_iteration()
+        self.input.write_bytes(b"test build")
+        self.order["inputs"][0]["sha256"] = mod.digest(self.input)
+        cycle["buildId"] = "build-1"
+        decision = mod.read(cycle["decision"]["path"])
+        decision["changeKind"] = "scenario"
+        decision["reason"] = "Correct author test checkpoint without changing mod"
+        mod.write(cycle["decision"]["path"], decision)
+        cycle["decision"]["sha256"] = mod.digest(cycle["decision"]["path"])
+        return cycle
+
+    def test_scenario_only_cycle_keeps_real_build_and_runs_with_changed_plan(self):
+        cycle = self.scenario_correction()
+        self.order["testing"]["checks"].append({"name": "corrected-check", "role": "subject"})
+        self.automatic_submit(cycle, testing=self.order["testing"])
+        stored = json.loads(self.p.get("test-2")["request"])
+        self.assertEqual(stored["cycle"]["buildId"], "build-1")
+        self.assertEqual(stored["inputs"], json.loads(self.p.get("test-1")["request"])["inputs"])
+        self.assertEqual(self.p.claim()["id"], "test-2")
+
+    def test_scenario_only_cycle_refuses_unchanged_test(self):
+        cycle = self.scenario_correction()
+        with self.assertRaisesRegex(ValueError, "changed test content"):
+            self.automatic_submit(cycle, testing=self.order["testing"])
+
+    def test_scenario_only_cycle_refuses_fake_build_or_modified_mod(self):
+        cycle = self.scenario_correction()
+        self.order["testing"]["checks"].append({"name": "corrected-check", "role": "subject"})
+        cycle["buildId"] = "fake-build-2"
+        with self.assertRaisesRegex(ValueError, "retain the actual build"):
+            self.automatic_submit(cycle, testing=self.order["testing"])
+        cycle["buildId"] = "build-1"
+        self.input.write_bytes(b"changed mod")
+        self.order["inputs"][0]["sha256"] = mod.digest(self.input)
+        with self.assertRaisesRegex(ValueError, "retain the actual build"):
+            self.automatic_submit(cycle, testing=self.order["testing"])
+
     def test_cycle_requires_fresh_build_and_healthy_analysis(self):
         cycle = self.completed_cycle_iteration()
         self.input.write_bytes(b"test build")

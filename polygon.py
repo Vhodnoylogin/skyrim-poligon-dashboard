@@ -470,8 +470,16 @@ class Polygon:
         required_string(analysis, "reason")
         if any(analysis.get(key) is not True for key in ("withinScope", "evidenceComplete", "toolingHealthy", "criteriaUnmet")):
             raise ValueError("Uncertain evidence/tooling/scope or fulfilled criteria stops the cycle")
-        if cycle["buildId"] == request["cycle"]["buildId"] or sorted(p["sha256"] for p in order["inputs"]) == sorted(p["sha256"] for p in request["inputs"]):
-            raise ValueError("Fix iteration requires a new build id and installed input hashes")
+        if analysis.get("changeKind", "mod") == "scenario":
+            if cycle["buildId"] != request["cycle"]["buildId"] or sorted((p["path"], p["sha256"]) for p in order["inputs"]) != sorted((p["path"], p["sha256"]) for p in request["inputs"]):
+                raise ValueError("Scenario-only correction must retain the actual build and installed inputs")
+            if all(order.get(k) == request.get(k) for k in ("scenarioData", "resolvedConfig", "testing", "observations", "playerSteps")):
+                raise ValueError("Scenario-only correction requires changed test content")
+        elif analysis.get("changeKind", "mod") == "mod":
+            if cycle["buildId"] == request["cycle"]["buildId"] or sorted(p["sha256"] for p in order["inputs"]) == sorted(p["sha256"] for p in request["inputs"]):
+                raise ValueError("Fix iteration requires a new build id and installed input hashes")
+        else:
+            raise ValueError("Decision changeKind must be mod or scenario")
 
     def check_launch_authorization(self, order):
         with self.connect() as con:

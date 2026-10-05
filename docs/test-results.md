@@ -94,9 +94,13 @@ same gate and all hashes, so bypassing outbox cannot mark a premature notificati
 delivered. A duplicate delivery preserves the first receipt. Already historical
 deliveries remain historical; they are not retroactively revoked or resent.
 An origin notification contains ID, testing outcome and final-report path, with
-raw-packet refs/hashes in the report. Detailed reports stay in files. Ordinary
-return handling permits analysis/report. Any requested repair follows separately
-verified owner task scope; it never grants another launch or an unbounded cycle.
+raw-packet refs/hashes in the report. Detailed reports stay in files. The origin prepares checks, studies the completed report, fixes in-scope findings,
+builds/installs when needed and prepares a new immutable order. These duties are
+the same for manual and full-cycle testing; run count alone never requires renewed
+repair approval. Honor explicit owner limits and existing task scope. Polygon and
+the owner control launch authorization and the shared installation/game slot.
+A scenario-only correction retains the actual mod version/build and installed pins.
+Preparing the next order grants no additional launch or unbounded cycle.
 
 ## Outcome and coverage
 

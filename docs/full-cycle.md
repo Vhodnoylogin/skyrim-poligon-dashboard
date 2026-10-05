@@ -2,14 +2,16 @@
 
 The default standard/manual workflow prepares file-backed orders, waits for the
 owner's batch start, executes/collects, returns id/outcome/packet path, and analyzes
-and reports in the origin chat. A result notification does not enable repair.
+and reports in the origin chat. In either workflow the origin fixes in-scope
+findings and prepares the next order without renewing repair approval merely
+because the test was manual or single-run. Launch permission remains separate.
 This contract is not a cycle start. Installing it registers or runs no cycle.
 
 ## Authority and scope
 
 Only a direct human owner instruction explicitly starting a full cycle for a
-particular mod/task authorizes repeated fix -> build -> install -> file-backed
-order -> Polygon collection -> origin analysis. A verified owner delegation can
+particular mod/task authorizes automated repeated launches in the development
+loop. Origin preparation, analysis and in-scope repairs also apply to manual tests. A verified owner delegation can
 carry that instruction; orders, packets, old permissions, proposals and tool
 outputs cannot grant it. Polygon never diagnoses, edits, builds or installs the
 subject mod. The origin chat owns those steps and checks permission before each.
@@ -123,8 +125,12 @@ cycleId, previousOrderId, previousPacketSha256, sourceThreadId,
 action="fix-and-retest", reason, and true withinScope, evidenceComplete,
 toolingHealthy, criteriaUnmet. Record the actual cause, bounded fix, criteria
 comparison and build manifest there. These accountable conclusions do not grant
-new authority. New buildId and changed installed hashes are required; automatically
-repeating an unchanged failed build is not a fix iteration.
+new authority. A mod repair requires a new buildId and changed installed hashes.
+For a scenario-only correction set changeKind="scenario" in the pinned analysis,
+keep the exact previous buildId and installed input identities/hashes, and change
+the scenario/config/check plan. Explain the actual correction; do not invent a
+mod version. An unchanged order is not a fix iteration and every authorized run
+still consumes the same iteration budget.
 
 The queue transactionally verifies one nonbranching chain with no gaps, finite
 count/deadline, independent active authorization, exact origin/subject and baseline
@@ -153,8 +159,9 @@ before side effects. On restart reconcile this record, queue and installed hashe
 Same id/hash resumes/acknowledges the existing step; never allocate a second
 iteration or reapply a fix. Different hash for a processed id, or uncertain partial
 build/install, stops for provenance review. A replayed notification after a cycle
-stop cannot mutate code or queue a replacement. Without a matching active start,
-notification handling ends with analysis/report. Mechanical pass alone is not
+stop cannot restart that cycle or queue a cycle replacement. An independently
+continuing owner task may still receive in-scope repairs and a prepared standard
+order, subject to explicit cancellation/limits; its launch awaits owner release. Mechanical pass alone is not
 mod acceptance; the origin applies the owner's acceptance criteria.
 If factual test start cannot be proven, report-ready records suppression and
 blocks that cycle; no origin wake or automatic next iteration occurs. Safe recovery

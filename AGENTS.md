@@ -18,8 +18,12 @@ only that finite batch is released. Heartbeat discovery is not launch permission
 Old wake messages never create orders. Origin notifications require factual test
 start, ended attempt, restoration, collected evidence and report-ready validation.
 Before-test aborts/withdrawals remain file/board records, never app/ledger messages
-or tested/delivered labels. Send id/testing outcome/final-report path. Ordinary
-handling is analysis/report; repairs require separate owner task scope.
+or tested/delivered labels. Send id/testing outcome/final-report path. The origin prepares checks, studies the completed report, fixes in-scope findings,
+builds/installs when needed and prepares a new immutable order. These duties are
+the same for manual and full-cycle testing; run count alone never requires renewed
+repair approval. Honor explicit owner limits and existing task scope. Polygon and
+the owner control launch authorization and the shared installation/game slot.
+A scenario-only correction retains the actual mod version/build and installed pins.
 Full cycle is off by default and requires an explicit owner
 start for this mod/task; read docs/full-cycle.md before using it. That start permits
 a short mod-to-Polygon mode notice with authorization reference, not test details.

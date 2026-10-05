@@ -274,9 +274,14 @@ collection and register a verified final report with `report-ready`. Only eligib
 entries appear in `outbox`: notify exact **sourceThreadId** with order id, testing
 outcome and final-report path. Pre-test abort/cancel/withdraw sends no app or ledger
 message. A pending same-origin released successor/repeat defers notification.
-Detailed samples/logs remain in files. Ordinary return permits analysis/report;
-repairs require separate owner task scope and further launches need authorization.
-Continuation requires the separately owner-started active full-cycle contract.
+Detailed samples/logs remain in files. The origin prepares checks, studies the completed report, fixes in-scope findings,
+builds/installs when needed and prepares a new immutable order. These duties are
+the same for manual and full-cycle testing; run count alone never requires renewed
+repair approval. Honor explicit owner limits and existing task scope. Polygon and
+the owner control launch authorization and the shared installation/game slot.
+A scenario-only correction retains the actual mod version/build and installed pins.
+A new manual order waits for owner release; automated launch continuation requires
+the separately owner-started active bounded full-cycle contract.
 Mark `delivered` only after a successful app tool receipt identifying the exact
 target/order; retain that receipt in the note. The same eligibility gate applies to any ledger result/error; no preparatory or
 suppressed-result ledger message may wake an origin. Retain only eligible final

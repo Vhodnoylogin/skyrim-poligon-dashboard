@@ -98,7 +98,7 @@ automation or ask Polygon to wake the origin as a substitute for these reads.
 
 Only that origin may now install its staged build and bounded dependencies,
 prepare an exclusive clean source profile if justified, verify the active source
-and fresh installed pins, and write/validate/submit the full ordinary order with
+and verified installed pins (unchanged for scenario-only fixes), and write/validate/submit the full ordinary order with
 cycle.slotId=<reserved-slot-id>. Capture actual active profile, enabled mod/load
 order and all relevant installed dependency/configuration hashes after installation;
 other mods' latest accepted builds may be present. Do not assume a queue ticket
