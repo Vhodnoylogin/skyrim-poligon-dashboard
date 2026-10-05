@@ -16,6 +16,217 @@ spec.loader.exec_module(mod)
 
 
 class Tests(unittest.TestCase):
+    def final_fixture(self, checks, reason="", outcome="failed", restored=True):
+        self.automatic_submit()
+        self.order["testing"]["checks"].append({"name": "later-check", "role": "subject"})
+        # Author this plan before submission under a new immutable fixture ID.
+        self.order["id"] = "final-fixture"
+        self.automatic_submit(testing=self.order["testing"])
+        folder = self.root / "runtime/runs/final-fixture"
+        mod.write(folder / "state.json", {"id": "run-fixture", "order": {"id": "final-fixture"},
+                  "done": True, "restored": restored, "restoreErrors": []})
+        mod.write(folder / "result.json", {"checks": checks, "result": outcome, "reason": reason,
+                  "restored": restored, "restoreErrors": []})
+        return self.p.finish("final-fixture", outcome, reason, folder, restored)
+
+    def test_before_subject_boundary_never_marks_tested_or_notifies(self):
+        self.final_fixture([{"name": "fixture-loaded", "result": "passed"}], "Windows foreground refused")
+        self.ready("final-fixture")
+        item = next(b for b in self.p.board() if b["id"] == "final-fixture")
+        self.assertEqual(item["testOutcome"], "not_started")
+        self.assertEqual(item["testingLifecycle"], "not_started")
+        self.assertEqual(item["notificationEligibility"], "suppressed")
+        self.assertFalse(self.p.pending())
+        with self.assertRaisesRegex(ValueError, "notification prohibited"):
+            self.p.delivered("final-fixture", "Must not create receipt")
+        self.assertIsNone(self.p.get("final-fixture")["delivery"])
+
+    def test_subject_mismatch_partial_coverage_is_separate_from_assertion_stop(self):
+        self.final_fixture([{"name": "subject-check", "result": "failed"}], "Assertion failed: subject-check")
+        self.ready("final-fixture")
+        report = mod.read(self.p.pending()[0]["report"])["orders"][0]["testResult"]
+        self.assertEqual(report["outcome"], "tested_with_errors")
+        self.assertEqual(report["execution"]["terminationCause"], "assertion_stop")
+        self.assertEqual(report["coverage"]["failed"], 1)
+        self.assertEqual(report["coverage"]["not_run"], 1)
+        self.assertIsNone(report["analysis"])
+
+    def test_mismatch_and_external_interruption_are_both_preserved(self):
+        self.final_fixture([{"name": "subject-check", "result": "failed"}], "Owned process exited unexpectedly")
+        self.ready("final-fixture")
+        report = mod.read(self.p.pending()[0]["report"])["orders"][0]["testResult"]
+        self.assertEqual(report["outcome"], "tested_with_errors")
+        self.assertTrue(report["interruptionObserved"])
+        self.assertTrue(report["subjectMismatchObserved"])
+        self.assertEqual(report["execution"]["terminationCause"], "unexpected_process_exit")
+
+    def test_normal_close_requires_all_checks_and_requested_data_for_success(self):
+        packet = self.final_fixture([{"name": n, "result": "passed"} for n in ("subject-check", "later-check")], outcome="passed")
+        path = self.root / "complete.json"
+        pin = next(e for e in packet["files"] if Path(e["path"]).name == "result.json")
+        mod.write(path, {"schemaVersion": 1, "id": "all-complete", "orderIds": ["final-fixture"],
+                        "summary": "Checks and data collected", "collectionFinished": True,
+                        "dataCoverage": {"final-fixture": [{"name": "state", "status": "collected", "evidence": [pin]}]}})
+        self.p.report_ready(path)
+        entry = mod.read(self.p.pending()[0]["report"])["orders"][0]["testResult"]
+        self.assertEqual(entry["outcome"], "tested_successfully")
+        self.assertEqual(entry["execution"]["terminationCause"], "normal_close")
+
+    def test_passed_process_without_data_is_incomplete(self):
+        self.final_fixture([{"name": n, "result": "passed"} for n in ("subject-check", "later-check")], outcome="passed")
+        self.ready("final-fixture")
+        self.assertEqual(self.p.pending()[0]["testOutcome"], "incomplete")
+
+    def test_report_must_wait_for_completion_restoration_and_later_origin_work(self):
+        self.final_fixture([{"name": "subject-check", "result": "passed"}], restored=False)
+        with self.assertRaisesRegex(ValueError, "Restore"):
+            self.ready("final-fixture")
+        self.assertFalse(self.p.pending())
+
+    def test_packet_alone_and_running_order_never_expose_tested_status(self):
+        self.submit()
+        self.p.assisted_start("test-1")
+        self.assertIsNone(self.p.board()[0]["testOutcome"])
+        self.assertEqual(self.p.board()[0]["testingLifecycle"], "in_progress")
+        self.observed()
+        self.p.finish("test-1", "collected", "Done")
+        self.assertIsNone(self.p.board()[0]["testOutcome"])
+        self.assertFalse(self.p.pending())
+        with self.assertRaisesRegex(ValueError, "notification prohibited"):
+            self.p.delivered("test-1", "Premature receipt")
+
+    def test_legacy_boundary_and_late_unpinned_checkpoint_stay_suppressed(self):
+        self.order.pop("testing")
+        self.submit()
+        self.p.assisted_start("test-1")
+        self.p.finish("test-1", "collected", "Done")
+        self.observed()
+        self.ready("test-1")
+        self.assertFalse(self.p.pending())
+        self.assertEqual(self.p.board()[0]["testOutcome"], "not_started")
+
+    def test_declared_but_unpinned_late_observation_cannot_create_test_start(self):
+        self.submit()
+        self.p.assisted_start("test-1")
+        self.p.finish("test-1", "collected", "Done")
+        self.observed()
+        self.ready("test-1")
+        self.assertFalse(self.p.pending())
+
+    def test_raw_packet_and_original_notes_stay_immutable(self):
+        self.submit()
+        self.p.assisted_start("test-1")
+        self.p.note("test-1", "observation", "Before report")
+        self.observed()
+        self.p.finish("test-1", "collected", "Done")
+        packet = Path(self.p.get("test-1")["packet"])
+        before = packet.read_bytes()
+        self.p.note("test-1", "tool_improvement", "Later note")
+        self.assertEqual(packet.read_bytes(), before)
+        self.ready("test-1")
+        self.assertTrue(self.p.pending())
+        with self.assertRaisesRegex(ValueError, "immutable"):
+            self.p.finish("test-1", "collected", "Changed")
+
+    def test_final_report_provenance_and_idempotency(self):
+        self.submit()
+        self.p.assisted_start("test-1")
+        self.observed()
+        self.p.finish("test-1", "collected", "Done")
+        result = self.ready("test-1")
+        self.assertTrue(self.ready("test-1")["duplicate"])
+        target = Path(result["report"])
+        target.write_text(target.read_text() + " ")
+        with self.assertRaisesRegex(ValueError, "report hash mismatch"):
+            self.p.pending()
+        with self.assertRaisesRegex(ValueError, "report hash mismatch"):
+            self.p.delivered("test-1", "No receipt")
+
+    def test_released_same_origin_successor_defers_finalization(self):
+        self.submit()
+        self.p.assisted_start("test-1")
+        self.observed()
+        self.p.finish("test-1", "collected", "Done")
+        self.order["id"] = "successor"
+        self.automatic_submit()
+        self.p.release_batch(self.approval(False, orderIds=["successor"]))
+        with self.assertRaisesRegex(ValueError, "still pending"):
+            self.ready("test-1")
+        self.assertFalse(self.p.pending())
+
+    def test_preparation_app_grant_rejected_and_file_origin_verified(self):
+        self.p.register_cycle(self.approval())
+        self.p.request_slot(self.ticket("slot-1", "cycle-1", "test-1"))
+        self.p.grant_slot()
+        with self.assertRaisesRegex(ValueError, "prohibited"):
+            self.p.slot_notified("slot-1", "App receipt")
+        self.ack("slot-1")
+        path = self.root / "slot-1-ack.json"
+        value = mod.read(path)
+        value["sourceThreadId"] = "wrong"
+        mod.write(path, value)
+        with self.assertRaisesRegex(ValueError, "exact origin"):
+            self.p.acknowledge_slot("slot-1", path)
+
+    def test_control_chain_can_declare_launch_attempt_as_its_subject_boundary(self):
+        self.automatic_submit()
+        self.order["id"] = "control-chain"
+        testing = {"start": {"kind": "event", "event": "phase", "name": "start-skse"}, "checks": []}
+        self.automatic_submit(testing=testing)
+        run = self.root / "runtime/runs/control-chain"
+        mod.write(run / "state.json", {"order": {"id": "control-chain"}, "done": True, "restored": True})
+        mod.write(run / "result.json", {"checks": [], "restored": True})
+        (run / "steps.jsonl").write_text(json.dumps({"kind": "phase", "name": "start-skse"}) + "\n")
+        self.p.finish("control-chain", "failed", "Windows foreground refused", run, True)
+        self.ready("control-chain")
+        self.assertEqual(self.p.pending()[0]["testOutcome"], "interrupted_external")
+
+    def test_fixture_failure_after_subject_start_is_external_not_subject_error(self):
+        self.automatic_submit()
+        self.order["id"] = "tool-failure"
+        testing = {"start": {"kind": "check", "name": "subject-check"},
+                   "checks": [{"name": "subject-check", "role": "subject"}, {"name": "quality", "role": "tooling"}]}
+        self.automatic_submit(testing=testing)
+        run = self.root / "runtime/runs/tool-failure"
+        mod.write(run / "state.json", {"order": {"id": "tool-failure"}, "done": True, "restored": True})
+        mod.write(run / "result.json", {"checks": [{"name": "subject-check", "result": "passed"}, {"name": "quality", "result": "failed"}], "restored": True})
+        self.p.finish("tool-failure", "failed", "Assertion failed: quality", run, True)
+        self.ready("tool-failure")
+        self.assertEqual(self.p.pending()[0]["testOutcome"], "interrupted_external")
+
+    def test_eligible_report_becomes_temporarily_hidden_during_new_origin_work(self):
+        self.submit()
+        self.p.assisted_start("test-1")
+        self.observed()
+        self.p.finish("test-1", "collected", "Done")
+        self.ready("test-1")
+        self.assertTrue(self.p.pending())
+        self.order["id"] = "next-player-test"
+        self.submit()
+        self.p.assisted_start("next-player-test")
+        self.assertFalse(self.p.pending())
+        with self.assertRaisesRegex(ValueError, "still pending"):
+            self.p.delivered("test-1", "Premature receipt")
+
+    def test_file_ack_tampering_stops_order_admission(self):
+        self.p.register_cycle(self.approval())
+        self.automatic_submit(self.cycle())
+        ack = self.root / "slot-test-1-ack.json"
+        ack.write_text(ack.read_text() + " ")
+        self.order["id"] = "tampered-ack"
+        with self.p.connect() as con:
+            with self.assertRaisesRegex(ValueError, "file acknowledgment"):
+                self.p.validate_cycle(con, mod.read(self.file))
+
+    def test_before_test_cycle_abort_stops_without_notification_or_next_iteration(self):
+        self.p.register_cycle(self.approval())
+        self.automatic_submit(self.cycle())
+        self.p.finish("test-1", "blocked", "Refused before testing")
+        self.ready("test-1")
+        self.assertFalse(self.p.pending())
+        self.assertEqual(self.p.cycle_state("cycle-1")["status"], "blocked")
+        self.assertEqual(self.p.board()[0]["testOutcome"], "not_started")
+
     def test_root_from_checkout_location_is_never_guessed(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {}, clear=True), patch.object(mod.Path, "cwd", return_value=Path(folder)):
             with self.assertRaisesRegex(ValueError, "--root"):
@@ -43,6 +254,7 @@ class Tests(unittest.TestCase):
         self.order = {"schemaVersion": 1, "id": "test-1", "mode": "assisted", "subject": "Fixture mod",
                       "sourceChat": "fixture", "sourceThreadId": "thread-1", "profile": "Test",
                       "purpose": "Collect state", "collect": ["state"],
+                      "testing": {"start": {"kind": "observation", "query": {"tool": "inspect", "args": {"kind": "state"}}}},
                       "inputs": [{"path": str(self.input), "sha256": mod.digest(self.input)}],
                       "playerSteps": ["Enter fixture"], "observations": [{"tool": "inspect", "args": {"kind": "state"}}]}
         self.file = self.root / "order.json"
@@ -51,8 +263,10 @@ class Tests(unittest.TestCase):
         mod.write(self.file, self.order)
         return self.p.submit(self.file)
 
-    def automatic_submit(self, cycle=None):
-        self.order.update(mode="automatic", config="config.json", scenario="scenario.json")
+    def automatic_submit(self, cycle=None, testing=None):
+        self.order.update(mode="automatic", config="config.json", scenario="scenario.json",
+                          testing=testing or {"start": {"kind": "check", "name": "subject-check"},
+                                   "checks": [{"name": "subject-check", "role": "subject"}]})
         if cycle is not None:
             self.order["cycle"] = cycle
             try:
@@ -71,7 +285,7 @@ class Tests(unittest.TestCase):
                     self.p.request_slot(ticket)
                     grant = self.p.grant_slot()
                     if grant.get("id") == slot_id and grant["status"] == "reserved":
-                        self.p.slot_notified(slot_id, "Offline exact-origin grant receipt")
+                        self.ack(slot_id)
                     cycle["slotId"] = slot_id
                 else:
                     cycle["slotId"] = slots[0]["id"]
@@ -108,6 +322,7 @@ class Tests(unittest.TestCase):
         self.automatic_submit(self.cycle())
         self.assertIsNotNone(self.p.claim())
         self.finish_cycle_fixture("test-1", "run-1")
+        self.ready("test-1")
         self.p.delivered("test-1", "App receipt for thread-1/test-1")
         packet_path = Path(self.p.get("test-1")["packet"])
         decision = self.root / "analysis.json"
@@ -127,8 +342,30 @@ class Tests(unittest.TestCase):
         (archive / "saves/fixture.ess").write_bytes(b"fake save")
         mod.write(folder / "state.json", {"order": {"id": job}, "done": True, "restored": True,
                   "profileArchive": str(archive), "testProfile": str(self.root / "profiles" / ("Autotest-" + run))})
-        mod.write(folder / "result.json", {"restored": True, "result": "failed", "restoreErrors": []})
+        mod.write(folder / "result.json", {"restored": True, "result": "failed", "restoreErrors": [],
+                  "checks": [{"name": "subject-check", "result": "failed"}]})
         self.p.finish(job, "failed", "Prescribed assertion mismatch", folder, True)
+
+    def ack(self, slot):
+        grant = next(s for s in self.p.slots() if s["id"] == slot)
+        request = json.loads(grant["request"])
+        path = self.root / (slot + "-ack.json")
+        mod.write(path, {"schemaVersion": 1, "slotId": slot, "cycleId": grant["cycle_id"],
+                         "iteration": grant["iteration"], "orderId": grant["order_id"],
+                         "sourceChat": request["sourceChat"], "sourceThreadId": request["sourceThreadId"],
+                         "grantSha256": grant["grantSha256"]})
+        return self.p.acknowledge_slot(slot, path)
+
+    def observed(self):
+        path = self.p.evidence_dir("test-1") / "observations.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"observations": [{"query": self.order["observations"][0], "response": {"state": "fixture"}}]}) + "\n")
+
+    def ready(self, *ids):
+        path = self.root / ("report-" + ids[0] + ".json")
+        mod.write(path, {"schemaVersion": 1, "id": "report-" + ids[0], "orderIds": list(ids),
+                         "summary": "Offline final evidence", "collectionFinished": True})
+        return self.p.report_ready(path)
 
     def ticket(self, slot, cycle, order, iteration=1, chat="fixture", thread="thread-1"):
         path = self.root / (slot + ".json")
@@ -155,8 +392,8 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.p.grant_slot()["id"], "slot-b1")
         other = mod.Polygon(self.root)
         self.assertEqual(other.grant_slot()["id"], "slot-b1")
-        self.p.slot_notified("slot-b1", "App receipt thread-b/slot-b1")
-        self.assertTrue(self.p.slot_notified("slot-b1", "Duplicate app receipt")["duplicate"])
+        self.ack("slot-b1")
+        self.assertTrue(self.ack("slot-b1")["duplicate"])
         self.p.stop_cycle("cycle-b", "cancelled", "Owner cancelled B only")
         self.assertEqual(self.p.grant_slot()["status"], "blocked")
         self.p.clear_slot("slot-b1", self.clearance(slot="slot-b1"))
@@ -193,7 +430,7 @@ class Tests(unittest.TestCase):
         self.p.grant_slot()
         order = dict(self.order, mode="automatic", cycle=dict(self.cycle(), slotId="slot-real"))
         with self.p.connect() as con:
-            with self.assertRaisesRegex(ValueError, "delivery receipt"):
+            with self.assertRaisesRegex(ValueError, "file acknowledgment"):
                 self.p.validate_cycle(con, order)
 
     def test_manual_released_batch_precedes_new_install_reservations(self):
@@ -397,6 +634,7 @@ class Tests(unittest.TestCase):
     def test_delivery_preserves_first_receipt_and_refuses_wrong_origin(self):
         self.submit()
         self.p.assisted_start("test-1")
+        self.observed()
         self.p.finish("test-1", "collected", "Offline collection")
         path = Path(self.p.get("test-1")["packet"])
         packet = mod.read(path)
@@ -405,6 +643,7 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "origin/order mismatch"): self.p.pending()
         packet["sourceThreadId"] = "thread-1"
         mod.write(path, packet)
+        self.ready("test-1")
         self.assertEqual(self.p.pending()[0]["packetSha256"], mod.digest(path))
         with self.assertRaises(ValueError): self.p.delivered("test-1", " ")
         self.p.delivered("test-1", "First verified receipt")
@@ -458,9 +697,12 @@ class Tests(unittest.TestCase):
     def test_packet_is_raw_delivery_pending_until_receipt(self):
         self.submit()
         self.p.assisted_start("test-1")
+        self.observed()
         packet = self.p.finish("test-1", "collected", "Player finished")
         self.assertIsNone(packet["analysis"])
         self.assertIsNone(packet["restored"])
+        self.assertEqual(self.p.pending(), [])
+        self.ready("test-1")
         self.assertEqual(self.p.pending()[0]["threadId"], "thread-1")
         self.p.delivered("test-1", "App tool returned success")
         self.assertFalse(self.p.pending())

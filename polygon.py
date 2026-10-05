@@ -114,6 +114,10 @@ class Polygon:
             CREATE UNIQUE INDEX IF NOT EXISTS one_install_run_slot ON cycle_slots((1))
               WHERE status IN ('reserved','blocked');
             CREATE TABLE IF NOT EXISTS pipeline_holds (id TEXT PRIMARY KEY, note TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS final_reports (
+              id TEXT PRIMARY KEY, request TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS notification_results (
+              id TEXT PRIMARY KEY, report_id TEXT NOT NULL, eligibility TEXT NOT NULL, reason TEXT NOT NULL);
             CREATE UNIQUE INDEX IF NOT EXISTS one_active_game ON jobs((1))
               WHERE status='running';
             """)
@@ -237,7 +241,13 @@ class Polygon:
 
     def slots(self):
         with self.connect() as con:
-            return [dict(row) for row in con.execute("SELECT * FROM cycle_slots ORDER BY seq")]
+            return [self.slot_view(row) for row in con.execute("SELECT * FROM cycle_slots ORDER BY seq")]
+
+    @staticmethod
+    def slot_view(row):
+        result = dict(row)
+        result["grantSha256"] = hashlib.sha256((str(row["seq"]) + row["request"]).encode()).hexdigest()
+        return result
 
     def environment_idle(self):
         self.executor()
@@ -258,10 +268,10 @@ class Polygon:
                 if existing["status"] == "reserved" and (cycle["status"] != "active" or time.time() >= approval["deadlineUtc"]):
                     # Never release a possibly half-installed environment on a timeout.
                     con.execute("UPDATE cycle_slots SET status='blocked',note='Stopped/expired owner; installation review required' WHERE id=?", (existing["id"],))
-                    result = dict(existing)
+                    result = self.slot_view(existing)
                     result["status"] = "blocked"
                     return result
-                return dict(existing)
+                return self.slot_view(existing)
             if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone():
                 return {"status": "game_busy"}
             # A manually released finite batch finishes before changing its installation.
@@ -278,7 +288,7 @@ class Polygon:
                     con.execute("UPDATE cycle_slots SET status='cancelled',note='Approval stopped/expired/changed' WHERE id=?", (row["id"],))
                     continue
                 con.execute("UPDATE cycle_slots SET status='reserved' WHERE id=?", (row["id"],))
-                result = dict(row)
+                result = self.slot_view(row)
                 result["status"] = "reserved"
                 return result
         return {"status": "idle"}
@@ -286,7 +296,7 @@ class Polygon:
     def pipeline_status(self):
         with self.connect() as con:
             return {"holds": [dict(r) for r in con.execute("SELECT * FROM pipeline_holds")],
-                    "slots": [dict(r) for r in con.execute("SELECT * FROM cycle_slots ORDER BY seq")],
+                    "slots": [self.slot_view(r) for r in con.execute("SELECT * FROM cycle_slots ORDER BY seq")],
                     "activeOrders": [r["id"] for r in con.execute("SELECT id FROM jobs WHERE status='running'")]}
 
     def hold_pipeline(self, issue, note):
@@ -311,8 +321,11 @@ class Polygon:
         return {"id": issue, "status": "cleared"}
 
     def slot_notified(self, slot, receipt):
-        if not isinstance(receipt, str) or not receipt.strip():
-            raise ValueError("Successful exact-origin app grant receipt required")
+        raise ValueError("Preparation app notifications are prohibited; origin reads slots and uses slot-ack with a pinned file")
+
+    def acknowledge_slot(self, slot, path):
+        path = Path(path).resolve()
+        acknowledgment = read(path)
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT * FROM cycle_slots WHERE id=?", (slot,)).fetchone()
@@ -322,10 +335,20 @@ class Polygon:
             approval = json.loads(cycle["authorization"])
             if cycle["status"] != "active" or time.time() >= approval["deadlineUtc"]:
                 raise ValueError("Preparation grant expired or cycle stopped")
+            request = json.loads(row["request"])
+            expected = {"schemaVersion": 1, "slotId": slot, "cycleId": row["cycle_id"],
+                        "iteration": row["iteration"], "orderId": row["order_id"],
+                        "sourceChat": request["sourceChat"], "sourceThreadId": request["sourceThreadId"],
+                        "grantSha256": self.slot_view(row)["grantSha256"]}
+            if any(acknowledgment.get(k) != v for k, v in expected.items()):
+                raise ValueError("File acknowledgment must match exact origin and reserved grant")
+            receipt = json.dumps({"kind": "file-ack", "path": str(path), "sha256": digest(path)}, sort_keys=True)
             if row["receipt"]:
+                if row["receipt"] != receipt:
+                    raise ValueError("Slot acknowledgment already fixed; legacy app receipts cannot authorize new preparation")
                 return {"id": slot, "duplicate": True}
             con.execute("UPDATE cycle_slots SET receipt=? WHERE id=?", (receipt, slot))
-        return {"id": slot, "status": "notified"}
+        return {"id": slot, "status": "acknowledged"}
 
     def clear_slot(self, slot, path):
         """Owner-reviewed installation/recovery clearance, never timeout expiry."""
@@ -394,8 +417,12 @@ class Polygon:
         slot = con.execute("SELECT * FROM cycle_slots WHERE id=? AND status='reserved'", (required_string(cycle, "slotId"),)).fetchone()
         if not slot or (slot["cycle_id"], slot["iteration"], slot["order_id"]) != (cycle["id"], iteration, order["id"]):
             raise ValueError("Cycle order requires its exclusive install/run slot")
-        if not slot["receipt"]:
-            raise ValueError("Slot grant must have an exact-origin delivery receipt")
+        try:
+            ack = json.loads(slot["receipt"] or "null")
+            if not isinstance(ack, dict) or ack.get("kind") != "file-ack" or digest(ack["path"]) != ack["sha256"]:
+                raise ValueError("Invalid acknowledgment")
+        except (KeyError, OSError, ValueError, TypeError) as error:
+            raise ValueError("Slot grant requires a pinned exact-origin file acknowledgment") from error
         previous_rows = []
         for job in con.execute("SELECT * FROM jobs WHERE id != ?", (order["id"],)):
             request = json.loads(job["request"])
@@ -587,6 +614,7 @@ class Polygon:
                 return {"id": order["id"], "duplicate": True}
             self.validate_cycle(con, order)
             self.validate_profile_selection(order)
+            self.validate_testing(order.get("testing"))
             status = "queued" if order["mode"] == "automatic" else "waiting_player"
             con.execute("INSERT INTO jobs(id,mode,subject,origin,status,submitted,request) VALUES(?,?,?,?,?,?,?)",
                         (order["id"], order["mode"], order["subject"], order["sourceChat"], status, time.time(), canonical))
@@ -634,6 +662,225 @@ class Polygon:
         for pin in order["inputs"]:
             if digest(pin["path"]) != pin["sha256"]:
                 raise ValueError("Pinned input changed: " + pin["path"])
+
+    @staticmethod
+    def validate_testing(testing):
+        if testing is None:
+            return
+        if not isinstance(testing, dict) or not isinstance(testing.get("start"), dict):
+            raise ValueError("testing requires an explicit start checkpoint")
+        start = testing["start"]
+        if start.get("kind") == "check":
+            required_string(start, "name")
+        elif start.get("kind") == "event":
+            for key in ("event", "name"):
+                required_string(start, key)
+        elif start.get("kind") == "observation":
+            if not isinstance(start.get("query"), dict):
+                raise ValueError("Observation boundary needs exact query")
+        else:
+            raise ValueError("Unsupported testing start checkpoint")
+        names = set()
+        for check in testing.get("checks", []):
+            name = required_string(check, "name")
+            if name in names or check.get("role") not in ("subject", "fixture", "tooling"):
+                raise ValueError("Checks need unique names and explicit subject/fixture/tooling roles")
+            names.add(name)
+
+    @staticmethod
+    def execution_summary(order, run, outcome, reason):
+        """Technical evidence projection; never a test-order result or mod diagnosis."""
+        state = read(Path(run) / "state.json") if run and (Path(run) / "state.json").exists() else {}
+        if not run:
+            cause = "pre_session_refusal"
+        elif reason.startswith("Assertion failed:"):
+            cause = "assertion_stop"
+        elif "exited unexpectedly" in reason:
+            cause = "unexpected_process_exit"  # Evidence cannot distinguish CTD from external kill.
+        elif outcome == "passed" and state.get("done") is True and state.get("restored") is True:
+            cause = "normal_close"
+        elif any(text in reason for text in ("foreground", "connection lost", "stalled", "guardian", "abandoned")):
+            cause = "operational_interruption"
+        else:
+            cause = "unknown"
+        return {"schemaVersion": 1, "orderId": order["id"], "runId": state.get("id"),
+                "phase": state.get("phase"), "done": state.get("done"),
+                "terminationCause": cause, "rawOutcome": outcome, "reason": reason,
+                "restored": state.get("restored"), "restoreErrors": state.get("restoreErrors"),
+                "evidence": str(Path(run) / "steps.jsonl") if run else None}
+
+    def test_projection(self, order, packet):
+        run = packet.get("runDirectory")
+        pinned_paths = {Path(e["path"]).resolve() for e in packet["files"]}
+        result_path = Path(run) / "result.json" if run else None
+        result = read(result_path) if result_path and result_path.resolve() in pinned_paths else {}
+        actual = result.get("checks") or []
+        testing = order.get("testing")
+        started = False
+        if testing:
+            start = testing["start"]
+            if start["kind"] == "check":
+                started = any(c.get("name") == start["name"] for c in actual)
+            else:
+                path = Path(run) / "steps.jsonl" if run else self.evidence_dir(order["id"]) / "observations.jsonl"
+                events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.resolve() in pinned_paths else []
+                if start["kind"] == "event" and run:
+                    started = any(e.get("kind") == start["event"] and e.get("name") == start["name"] for e in events)
+                elif start["kind"] == "observation" and not run:
+                    started = any(s.get("query") == start["query"] and s.get("response") is not None
+                                  for e in events for s in e.get("observations", []))
+        plan = (testing or {}).get("checks", [])
+        coverage = []
+        for check in plan:
+            matches = [c for c in actual if c.get("name") == check["name"]]
+            status = matches[0].get("result") if len(matches) == 1 else "not_run" if not matches else "unavailable"
+            if status not in ("passed", "failed", "not_run"):
+                status = "unavailable"
+            coverage.append({"name": check["name"], "role": check["role"], "status": status})
+        names = {c["name"] for c in plan}
+        coverage.extend({"name": c.get("name"), "role": "unknown", "status": c.get("result", "unavailable")}
+                        for c in actual if c.get("name") not in names)
+        counts = {s: sum(c["status"] == s for c in coverage) for s in ("passed", "failed", "not_run", "unavailable")}
+        cause = self.execution_summary(order, run, packet["executionOutcome"], packet["reason"])
+        external = cause["terminationCause"] in ("pre_session_refusal", "unexpected_process_exit", "operational_interruption")
+        failed_subject = any(c["role"] == "subject" and c["status"] == "failed" for c in coverage)
+        failed_tool = any(c["role"] in ("fixture", "tooling") and c["status"] == "failed" for c in coverage)
+        if not started:
+            outcome = "not_started"
+        elif failed_subject:
+            outcome = "tested_with_errors"
+        elif external or failed_tool:
+            outcome = "interrupted_external"
+        elif plan and coverage and all(c["status"] == "passed" and c["role"] != "unknown" for c in coverage) and packet["executionOutcome"] == "passed":
+            outcome = "tested_successfully"
+        else:
+            outcome = "incomplete"
+        return {"outcome": outcome, "testingStarted": started, "startContractAvailable": testing is not None,
+                "interruptionObserved": external or failed_tool, "subjectMismatchObserved": failed_subject,
+                "coverage": {"required": len(plan) if testing else None, "performed": sum(c["status"] in ("passed", "failed") for c in coverage),
+                             **counts, "checks": coverage},
+                "requestedData": [{"name": name, "status": "unassessed"} for name in order["collect"]],
+                "execution": cause, "analysis": None}
+
+    @staticmethod
+    def verify_packet(row):
+        packet = read(row["packet"])
+        order = json.loads(row["request"])
+        if packet.get("orderId") != row["id"] or any(packet.get(k) != order[k] for k in ("sourceChat", "sourceThreadId")):
+            raise ValueError("Packet origin/order mismatch; delivery refused")
+        for entry in packet["files"]:
+            if digest(entry["path"]) != entry["sha256"] or Path(entry["path"]).stat().st_size != entry["bytes"]:
+                raise ValueError("Packet evidence manifest mismatch")
+        return order, packet
+
+    def report_ready(self, path):
+        """Finalize evidence after testing/collection; raw packets stay immutable."""
+        request = read(Path(path).resolve())
+        if request.get("schemaVersion") != 1 or not SAFE_ID.fullmatch(request.get("id", "")):
+            raise ValueError("Final report requires schemaVersion1 and safe id")
+        required_string(request, "summary")
+        if request.get("collectionFinished") is not True:
+            raise ValueError("Finish collection before finalizing report")
+        ids = request.get("orderIds")
+        if not isinstance(ids, list) or not ids or any(not isinstance(i, str) for i in ids) or len(set(ids)) != len(ids):
+            raise ValueError("Final report lists exact unique orderIds")
+        canonical = json.dumps(request, sort_keys=True, ensure_ascii=False)
+        with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            existing = con.execute("SELECT * FROM final_reports WHERE id=?", (request["id"],)).fetchone()
+            if existing:
+                if existing["request"] != canonical:
+                    raise ValueError("Final report id is immutable")
+                self.verify_final_report(con, existing)
+                return {"id": request["id"], "duplicate": True, "report": existing["path"]}
+            entries = []
+            origin = None
+            for job in ids:
+                row = con.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()
+                if not row or row["status"] not in ("recorded", "blocked") or not row["packet"]:
+                    raise ValueError("Finish testing attempt and collect its packet before report-ready")
+                if con.execute("SELECT id FROM notification_results WHERE id=?", (job,)).fetchone():
+                    raise ValueError("Order already has a final notification decision")
+                order, packet = self.verify_packet(row)
+                identity = (order["sourceChat"], order["sourceThreadId"])
+                if origin is not None and identity != origin:
+                    raise ValueError("Final report cannot mix originating chats")
+                origin = identity
+                run = packet.get("runDirectory")
+                if run:
+                    state = read(Path(run) / "state.json")
+                    if state.get("done") is not True or state.get("order", {}).get("id") != job:
+                        raise ValueError("Execution completion/identity not proven")
+                    if not any(Path(e["path"]).resolve() == (Path(run) / "state.json").resolve() for e in packet["files"]):
+                        raise ValueError("Execution completion is not in pinned packet evidence")
+                    if state.get("restored") is not True or state.get("restoreErrors"):
+                        raise ValueError("Restore the owned environment before final report delivery")
+                projection = self.test_projection(order, packet)
+                supplied = request.get("dataCoverage", {}).get(job, [])
+                if supplied:
+                    if not isinstance(supplied, list) or {d.get("name") for d in supplied} != set(order["collect"]) or len(supplied) != len(order["collect"]):
+                        raise ValueError("Data coverage must list each requested collection item exactly once")
+                    for item in supplied:
+                        if item.get("status") not in ("collected", "unavailable", "not_collected"):
+                            raise ValueError("Invalid collection coverage status")
+                        if item["status"] == "collected":
+                            if not item.get("evidence"):
+                                raise ValueError("Collected data requires pinned packet evidence references")
+                            for pin in item["evidence"]:
+                                if not any(e["path"] == pin.get("path") and e["sha256"] == pin.get("sha256") for e in packet["files"]):
+                                    raise ValueError("Collection evidence is outside the verified packet")
+                    projection["requestedData"] = supplied
+                if projection["outcome"] == "tested_successfully" and not all(d["status"] == "collected" for d in projection["requestedData"]):
+                    projection["outcome"] = "incomplete"
+                entries.append({"orderId": job, "packet": row["packet"], "packetSha256": digest(row["packet"]),
+                                "testResult": projection,
+                                "eligibility": "eligible" if projection["testingStarted"] else "suppressed",
+                                "reason": "Testing finished and collection finalized" if projection["testingStarted"] else "No declared factual test-start checkpoint; no origin notification"})
+            # Never wake an origin while a released successor/repeat or same-origin run is pending.
+            for row in con.execute("SELECT * FROM jobs WHERE status IN ('running','queued')"):
+                order = json.loads(row["request"])
+                if (order["sourceChat"], order["sourceThreadId"]) == origin and (row["status"] == "running" or order.get("cycle") or con.execute("SELECT id FROM released_orders WHERE id=?", (row["id"],)).fetchone()):
+                    raise ValueError("Origin testing work is still pending; finalize after its completion")
+            report = {"schemaVersion": 1, "id": request["id"], "sourceChat": origin[0], "sourceThreadId": origin[1],
+                      "summary": request["summary"], "collectionFinished": True, "finishedAt": time.time(), "orders": entries}
+            target = self.local / "final-reports" / request["id"] / "report.json"
+            if target.exists():
+                raise ValueError("Unregistered final-report file exists; preserve it for provenance review")
+            write(target, report)
+            con.execute("INSERT INTO final_reports VALUES(?,?,?,?)", (request["id"], canonical, str(target), digest(target)))
+            for entry in entries:
+                con.execute("INSERT INTO notification_results VALUES(?,?,?,?)", (entry["orderId"], request["id"], entry["eligibility"], entry["reason"]))
+                if entry["eligibility"] == "suppressed":
+                    job = con.execute("SELECT request FROM jobs WHERE id=?", (entry["orderId"],)).fetchone()
+                    cycle = json.loads(job["request"]).get("cycle")
+                    if cycle:
+                        con.execute("UPDATE cycles SET status='blocked',note=? WHERE id=? AND status='active'",
+                                    ("Factual test start unproven; no notification or continuation: " + entry["orderId"], cycle["id"]))
+        return {"id": request["id"], "report": str(target), "orders": [{"id": e["orderId"], "eligibility": e["eligibility"]} for e in entries]}
+
+    def verify_final_report(self, con, row):
+        if digest(row["path"]) != row["sha256"]:
+            raise ValueError("Final report hash mismatch")
+        report = read(row["path"])
+        for entry in report["orders"]:
+            job = con.execute("SELECT * FROM jobs WHERE id=?", (entry["orderId"],)).fetchone()
+            self.verify_packet(job)
+            if digest(job["packet"]) != entry["packetSha256"]:
+                raise ValueError("Final report packet hash mismatch")
+        return report
+
+    def delivery_report(self, con, row):
+        result = con.execute("SELECT * FROM notification_results WHERE id=?", (row["id"],)).fetchone()
+        if not result or result["eligibility"] != "eligible":
+            raise ValueError("No eligible completed testing report; notification prohibited")
+        registered = con.execute("SELECT * FROM final_reports WHERE id=?", (result["report_id"],)).fetchone()
+        report = self.verify_final_report(con, registered)
+        order = json.loads(row["request"])
+        for other in con.execute("SELECT * FROM jobs WHERE status IN ('running','queued')"):
+            request = json.loads(other["request"])
+            if request["sourceChat"] == order["sourceChat"] and request["sourceThreadId"] == order["sourceThreadId"] and (other["status"] == "running" or request.get("cycle") or con.execute("SELECT id FROM released_orders WHERE id=?", (other["id"],)).fetchone()):
+                raise ValueError("Origin testing work is still pending; notification prohibited")
+        return registered, next(e for e in report["orders"] if e["orderId"] == row["id"])
 
     def runtime_pins(self, order):
         pins = [{"path": str(p), "sha256": digest(p)} for p in sorted((self.executor()[0] / "skyrim_autotest").iterdir()) if p.is_file() and p.suffix in (".py", ".h", ".json")]
@@ -720,24 +967,33 @@ class Polygon:
         name = "service-findings.jsonl" if category.startswith("tool_") else "player-notes.jsonl"
         folder = self.evidence_dir(job)
         folder.mkdir(parents=True, exist_ok=True)
-        with (folder / name).open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps({"at": time.time(), "category": category, "text": text}, ensure_ascii=False) + "\n")
+        target = folder / name
         if row["packet"]:
-            packet = read(row["packet"])
-            self.finish(job, packet["executionOutcome"], packet["reason"], packet["runDirectory"], packet["restored"])
+            # Preserve any notes already included in the original raw manifest too.
+            target = folder / "followups" / (uuid.uuid4().hex + ".json")
+            write(target, {"at": time.time(), "category": category, "text": text})
+        else:
+            with target.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"at": time.time(), "category": category, "text": text}, ensure_ascii=False) + "\n")
         if category in ("tool_bug", "tool_suspected_bug"):
             self.hold_pipeline(job, "Shared tooling finding: " + text)
             cycle = json.loads(row["request"]).get("cycle")
             if cycle and self.cycle_state(cycle["id"])["status"] == "active":
                 self.stop_cycle(cycle["id"], "blocked", "Tooling finding in " + job)
-        return {"id": job, "recorded": str(folder / name)}
+        return {"id": job, "recorded": str(target)}
 
     def finish(self, job, outcome, note, run=None, restored=None):
         row = self.get(job)
+        if row["packet"]:
+            packet = read(row["packet"])
+            if (packet["executionOutcome"], packet["reason"], packet["runDirectory"], packet["restored"]) != (outcome, note, str(run) if run else None, restored):
+                raise ValueError("Retained raw packet is immutable; use a separate final report or finding")
+            return packet
         order = json.loads(row["request"])
         folder = self.evidence_dir(job)
         folder.mkdir(parents=True, exist_ok=True)
         findings = self.self_checks(job, run)
+        write(folder / "execution-summary.json", self.execution_summary(order, run, outcome, note))
         files = []
         roots = [folder] + ([Path(run)] if run else [])
         # Do not expose snapshot backups, credentials or private save copies.
@@ -978,15 +1234,25 @@ class Polygon:
     def pending(self):
         with self.connect() as con:
             rows = con.execute("SELECT * FROM jobs WHERE status IN ('recorded','blocked') AND delivery IS NULL ORDER BY submitted").fetchall()
-        out = []
-        for row in rows:
-            packet = read(row["packet"])
-            order = json.loads(row["request"])
-            if any(packet[k] != order[k] for k in ("sourceChat", "sourceThreadId")) or packet["orderId"] != row["id"]:
-                raise ValueError("Packet origin/order mismatch; delivery refused")
-            out.append({"orderId": row["id"], "threadId": order["sourceThreadId"],
-                        "sourceChat": order["sourceChat"], "packet": row["packet"], "packetSha256": digest(row["packet"]),
-                        "text": f"Skyrim-Polygon order {row['id']}: {packet['executionOutcome']}. Raw evidence packet: {row['packet']}. Read and analyze once in the originating chat. This notification alone does not authorize fixes or a new test; continuing requires a separately owner-authorized active cycle."})
+            out = []
+            for row in rows:
+                self.verify_packet(row)
+                decision = con.execute("SELECT eligibility FROM notification_results WHERE id=?", (row["id"],)).fetchone()
+                if not decision or decision["eligibility"] != "eligible":
+                    continue
+                # Pending same-origin work suppresses discovery until its completion.
+                try:
+                    registered, entry = self.delivery_report(con, row)
+                except ValueError as error:
+                    if "still pending" in str(error):
+                        continue
+                    raise
+                order = json.loads(row["request"])
+                out.append({"orderId": row["id"], "threadId": order["sourceThreadId"],
+                            "sourceChat": order["sourceChat"], "packet": row["packet"], "packetSha256": digest(row["packet"]),
+                            "report": registered["path"], "reportSha256": registered["sha256"],
+                            "testOutcome": entry["testResult"]["outcome"],
+                            "text": f"Skyrim-Polygon order {row['id']}: {entry['testResult']['outcome']}. Completed testing report: {registered['path']}. Read and analyze once. Repairs require the owner's task scope; further testing requires a separate launch authorization or an active bounded full cycle."})
         return out
 
     def delivered(self, job, receipt):
@@ -999,6 +1265,7 @@ class Polygon:
                 raise ValueError("No result to deliver")
             if row["status"] == "delivered":
                 return {"id": job, "duplicate": True}
+            self.delivery_report(con, row)
             con.execute("UPDATE jobs SET status='delivered',delivery=? WHERE id=?", (receipt, job))
             self.event(con, job, "delivered", receipt)
         return {"id": job, "status": "delivered"}
@@ -1013,6 +1280,19 @@ class Polygon:
                 item["workflow"] = "full-cycle" if cycle is not None else "standard"
                 item["cycleId"] = cycle["id"] if isinstance(cycle, dict) else None
                 item["awaitingOwnerStart"] = row["mode"] == "automatic" and row["status"] == "queued" and cycle is None and not con.execute("SELECT id FROM released_orders WHERE id=?", (row["id"],)).fetchone()
+                decision = con.execute("SELECT * FROM notification_results WHERE id=?", (row["id"],)).fetchone()
+                item["notificationEligibility"] = decision["eligibility"] if decision else "awaiting_final_report"
+                item["testOutcome"] = None
+                item["coverage"] = None
+                item["testingLifecycle"] = "in_progress" if row["status"] == "running" else "awaiting_final_report" if row["packet"] else "not_started"
+                if decision:
+                    registered = con.execute("SELECT * FROM final_reports WHERE id=?", (decision["report_id"],)).fetchone()
+                    report = self.verify_final_report(con, registered)
+                    entry = next(e for e in report["orders"] if e["orderId"] == row["id"])
+                    item["testOutcome"] = entry["testResult"]["outcome"]
+                    item["testingLifecycle"] = "completed" if entry["testResult"]["testingStarted"] else "not_started"
+                    item["coverage"] = entry["testResult"]["coverage"]
+                    item["finalReport"] = registered["path"]
                 result.append(item)
         return result
 
@@ -1062,6 +1342,11 @@ def main(argv=None):
     notified = sub.add_parser("slot-notified")
     notified.add_argument("id")
     notified.add_argument("--note", required=True)
+    ack = sub.add_parser("slot-ack", help="Origin acknowledges a file-backed grant; no app preparation message")
+    ack.add_argument("id")
+    ack.add_argument("acknowledgment", type=Path)
+    report = sub.add_parser("report-ready", help="Finalize completed testing evidence before any origin notification")
+    report.add_argument("report", type=Path)
     clearance = sub.add_parser("slot-clear")
     clearance.add_argument("id")
     clearance.add_argument("evidence", type=Path)
@@ -1099,6 +1384,8 @@ def main(argv=None):
         elif args.command == "pipeline-hold": result = polygon.hold_pipeline(args.id, args.note)
         elif args.command == "pipeline-clear": result = polygon.clear_pipeline(args.id, args.evidence)
         elif args.command == "slot-notified": result = polygon.slot_notified(args.id, args.note)
+        elif args.command == "slot-ack": result = polygon.acknowledge_slot(args.id, args.acknowledgment)
+        elif args.command == "report-ready": result = polygon.report_ready(args.report)
         elif args.command == "slot-clear": result = polygon.clear_slot(args.id, args.evidence)
         elif args.command == "cycle-show": result = polygon.cycle_state(args.id)
         elif args.command == "cycle-stop": result = polygon.stop_cycle(args.id, args.status, args.note)

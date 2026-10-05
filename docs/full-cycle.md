@@ -74,8 +74,10 @@ There is no cryptographic approval service or autonomous repair engine here.
 For one or several cycles, installation and execution use the exclusive shared
 slot protocol in [multi-chat-cycles.md](multi-chat-cycles.md). Build to external
 staging first; request/wait for a durable preparation grant before touching live
-MO2/game/profile files. The owner start authorizes short exact-origin slot grants
-as well as the initial mode notice and result return. Never install while another
+MO2/game/profile files. Slot grants/acknowledgments are file-backed and read by
+the origin; no preparatory app/ledger messages are sent to it. The owner start
+permits the initial origin-to-Polygon mode notice and eligible completed-result
+return. Never install while another
 cycle/run owns the environment. Use the same protocol even for a single cycle.
 
 After registration the origin sends **one short mode-start notice** to the
@@ -136,10 +138,13 @@ Never omit cycle metadata or invent a new cycle id to evade a stop/limit.
 
 ## Receipt and exactly one continuation decision
 
-Polygon sends id, mechanical outcome and packet path to exact sourceThreadId after
-completion/blockage. Detailed data stay in files. Failed app delivery remains
+Polygon sends id, testing outcome and final-report path to exact sourceThreadId
+only after declared factual test start, ended attempt, restoration, finished
+collection and report-ready validation (test-results.md). A raw packet or launch
+failure alone is ineligible. Before-test aborts/withdrawals remain file/board
+records without app/ledger origin messages. Detailed data stay in files. Failed app delivery remains
 pending; mark delivered only after a successful tool receipt for that target/order.
-A short ledger result/error may retain the same reference. Delivery is at least
+A ledger result/error may retain only an eligible completed-report reference. Delivery is at least
 once, not a promise of exactly-once side effects.
 
 The origin keeps external durable progress: processed order/hash, analysis/action,
@@ -151,6 +156,9 @@ build/install, stops for provenance review. A replayed notification after a cycl
 stop cannot mutate code or queue a replacement. Without a matching active start,
 notification handling ends with analysis/report. Mechanical pass alone is not
 mod acceptance; the origin applies the owner's acceptance criteria.
+If factual test start cannot be proven, report-ready records suppression and
+blocks that cycle; no origin wake or automatic next iteration occurs. Safe recovery
+and file-backed owner review remain possible without changing retained raw data.
 
 ## Stop, cancellation and recovery
 

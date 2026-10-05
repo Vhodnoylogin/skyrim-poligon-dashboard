@@ -34,8 +34,9 @@ chat/automation. New members/extensions require a new owner instruction.
 Group roster/budget verification and meaningful task/progress assessment are
 agent responsibilities; the DB enforces registered per-cycle quotas/deadlines and
 one shared reservation/session. There is no separate cryptographic group approval
-service. Each origin sends one short owner-authorized mode-start notice with
-cycle/authorization reference to Polygon. Test details stay in files.
+service. Each origin may send its owner-authorized mode-start notice to Polygon;
+Polygon never sends preparation prompts/grants to origins. Test details and
+preparation exchanges stay file-backed.
 
 ## Build independently, reserve installation
 
@@ -76,18 +77,24 @@ when it requests its next slot, so a fast origin cannot bypass waiting B/C.
 
 ```text
 python <repository>/polygon.py --root <ROOT> slot-next
-python <repository>/polygon.py --root <ROOT> slot-notified <slot-id> --note "Successful exact-origin app grant receipt"
+python <repository>/polygon.py --root <ROOT> slots
+python <repository>/polygon.py --root <ROOT> slot-ack <slot-id> <origin-ack.json>
 ```
 
-An explicit owner cycle start also authorizes the short grant notification to the
-ticket's exact sourceThreadId: slot id, cycle id, ticket path/id and permission to
-perform that registered preparation step. No test data is copied. Retry a missing
-grant receipt with the same id; never create another reservation. slot-next returns
-the existing reservation on repeated calls rather than granting another chat.
-The origin must check active authority, deadline and actual reserved slot after
-receiving it, and record progress before installation. A stale/duplicate grant is
+Polygon publishes reservations through slots/pipeline-status; origins read them
+while handling their already owner-started cycles. The origin writes an external
+ack JSON with schemaVersion1, slotId, cycleId, iteration, orderId, exact sourceChat/
+sourceThreadId and grantSha256 from slots, then calls slot-ack. This pins the file
+and verifies origin/grant identity. No app/ledger preparation message or wake is
+sent. slot-notified remains a rejecting compatibility command; old app receipts
+are preserved but cannot authorize new preparation. Repeated reads return the
+same grant; identical file acknowledgments are idempotent. The origin rechecks
+authority/deadline/reservation and records progress before install. A stale/duplicate grant is
 not permission to reapply installation. No task/wake message is required after
 slot-request or after each new order; the durable queue drives discovery.
+While awaiting a grant, the origin remains responsible for bounded file/board
+polling within its existing active cycle and deadline. Do not create an unrequested
+automation or ask Polygon to wake the origin as a substitute for these reads.
 
 Only that origin may now install its staged build and bounded dependencies,
 prepare an exclusive clean source profile if justified, verify the active source
@@ -104,7 +111,7 @@ two chats edit the same source files: assign one writer or serialize those edits
 parallel builds require stable independent source/output snapshots.
 
 The queue binds the order to the reserved cycle/iteration/order id and exact-origin
-grant receipt. Until restoration, no other installation, standard game run or
+file acknowledgment. Until restoration, no other installation, standard game run or
 assisted start can pass that shared reservation. Polygon copies the active profile,
 activates its copy and runs one scenario. It restores the original selection and
 archives the test copy including saves before healthy slot release. An authorized
@@ -163,8 +170,11 @@ reopens a stopped cycle; a new cycle needs a new explicit start. Clearances are
 agent-verified local evidence, not automatic authentication of the owner.
 
 Maintain each origin's durable processed packet/action/next-id/install/submission
-progress and Polygon's grant/result receipts. A restart first reconciles those
+progress and file grant acknowledgments/eligible final-result receipts. A restart first reconciles those
 records, slots, queue and native recovery. Re-delivery of a result or grant resumes
 the existing step or reports it; it never branches, reapplies a fix/install or
 allocates a fresh budget. Source confusion or unknown partial state stops for
-review. Only the exact origin receives its packet and performs mod diagnosis.
+review. Only the exact origin receives an eligible completed final-report
+notification and performs mod diagnosis. Factual test start/end, restoration,
+collection and report-ready are mandatory (test-results.md). Before-test failures/
+withdrawals remain file/board records, never tested/delivered labels or messages.

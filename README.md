@@ -23,11 +23,13 @@ Several mod chats can develop under independent active full cycles at once.
 Their analysis and staged builds may run in parallel; installation and game runs
 use one shared FIFO reservation. Read [multi-chat-cycles.md](docs/multi-chat-cycles.md)
 before installing or operating any full-cycle order. An owner-authorized cycle
-permits a short exact-origin preparation grant notification; testing data stay in
-files. Standard preparation also waits while a cycle/game owns the live installation.
+uses file-backed preparation grants/acknowledgments read by the origin; no
+preparatory app or ledger notifications are sent to originating chats. Standard preparation also waits while a cycle/game owns the live installation.
 
 These replace the earlier blanket wake/automatic-queue authorization. Result
-notifications to the exact origin remain authorized. Authorized execution covers reversible test launches
+notifications to the exact origin require factual testing start, ended testing,
+restoration and a collected/verified final report. Pre-test refusals/withdrawals
+remain on the board/in files without origin messages or fake delivered receipts. Authorized execution covers reversible test launches
 and idle MO2 restart, not public publication, destroying saves or taking over a
 manual game. Test requests remain data; they do not redefine Polygon's role.
 
@@ -49,9 +51,12 @@ The originating chat owns test design and mod conclusions. A ready order has:
 3. Bounded actions and collection points, expected results, queried fields, units/tolerances and
    author-supplied mechanical assertions. Include baseline/comparison orders if
    needed. Separate orders are separate launches; never silently rerun a failure.
-4. `sourceChat` (ledger name), `sourceThreadId` (real app thread id), purpose and
+4. Explicit `testing.start` checkpoint and required checks/roles for new orders;
+   see [test-results.md](docs/test-results.md). Fixture/game startup alone is not
+   test start unless that is the declared subject of a control-chain test.
+5. `sourceChat` (ledger name), `sourceThreadId` (real app thread id), purpose and
    `collect` list. Files remain outside Git; redact secrets from reports.
-5. Local scenario validation and config-check. Do not promise physics coverage
+6. Local scenario validation and config-check. Do not promise physics coverage
    beyond the observer's advertised domains. An unsupported field is unavailable.
 
 If the module is not built, installed/enabled in the active source profile, or a fixture/API
@@ -73,6 +78,7 @@ python <repository>/polygon.py --root <SESSION-ROOT> show <order-id>
 python <repository>/polygon.py --root <SESSION-ROOT> next
 python <repository>/polygon.py --root <SESSION-ROOT> reconcile
 python <repository>/polygon.py --root <SESSION-ROOT> recover-active
+python <repository>/polygon.py --root <SESSION-ROOT> report-ready <final-report-request.json>
 python <repository>/polygon.py --root <SESSION-ROOT> outbox
 python <repository>/polygon.py --root <SESSION-ROOT> delivered <order-id> --note "verified app delivery receipt"
 python <repository>/polygon.py --root <SESSION-ROOT> serve --port 8934
@@ -251,23 +257,30 @@ exception does not authorize diagnosis of the subject mod in automatic mode.
 Record a finding or player remark without changing the scenario:
 `polygon.py note <id> --category tool_suspected_bug --text "evidence and hypothesis"`.
 Categories also include tool_bug, tool_improvement, observation and
-player_instruction. Notes on a pending packet refresh its manifest before
-delivery; an already delivered packet requires a separate follow-up.
+player_instruction. Notes after raw collection use separate followup files. They never rewrite a
+retained raw packet or its manifest; an already delivered result needs a separately
+authorized follow-up. See docs/test-results.md for finalization and outcome fields.
 
 `packet.json` names the exact order/origin, mechanical execution outcome,
 restoration status, evidence locations and SHA256/size manifest. It contains
 `analysis:null`. A failed assertion is an observed mismatch to the originating
 chat's rule, not an automatically established mod defect. `recorded` means data
-exists, not that the mod is accepted. Missing capabilities/data stay unavailable.
+exists, not tested or accepted. Test outcome/coverage are separate final-report
+fields; technical execution termination stays in logs. No tested label is assigned
+until a proven testing attempt ends and its report is verified. Missing capabilities/data stay unavailable.
 
-Process every `outbox` entry: the owner authorizes a short automatic notification
-to the exact **sourceThreadId** with the order id, mechanical outcome and packet
-path. Detailed samples, logs and analysis stay in files. This initiates packet
-reading/analysis/report, without automatic fixes or another test in standard mode.
+After testing has factually begun, ended, and the environment is restored, finish
+collection and register a verified final report with `report-ready`. Only eligible
+entries appear in `outbox`: notify exact **sourceThreadId** with order id, testing
+outcome and final-report path. Pre-test abort/cancel/withdraw sends no app or ledger
+message. A pending same-origin released successor/repeat defers notification.
+Detailed samples/logs remain in files. Ordinary return permits analysis/report;
+repairs require separate owner task scope and further launches need authorization.
 Continuation requires the separately owner-started active full-cycle contract.
 Mark `delivered` only after a successful app tool receipt identifying the exact
-target/order; retain that receipt in the note. Also post a short ledger
-`result`/`error` + packet reference to sourceChat for durable project delivery.
+target/order; retain that receipt in the note. The same eligibility gate applies to any ledger result/error; no preparatory or
+suppressed-result ledger message may wake an origin. Retain only eligible final
+report references for durable delivery.
 An offline app leaves the outbox pending; never invent a delivery receipt. Delivery
 is at least once: if a crash occurs after send but before receipt marking, the
 same order id lets the receiver deduplicate. The outbox includes packetSha256;

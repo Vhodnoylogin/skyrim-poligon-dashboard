@@ -15,9 +15,12 @@ by the owner, but final diagnosis/fixes still stay in the mod chat.
 Standard/manual workflow: mod chats prepare/validate/submit complete file-backed
 orders without messaging Polygon. The owner then asks Polygon to start testing;
 only that finite batch is released. Heartbeat discovery is not launch permission.
-Old wake messages never create orders. Return notifications to the exact origin
-are authorized and contain id/outcome/packet path; normally they trigger analysis
-and a report only. Full cycle is off by default and requires an explicit owner
+Old wake messages never create orders. Origin notifications require factual test
+start, ended attempt, restoration, collected evidence and report-ready validation.
+Before-test aborts/withdrawals remain file/board records, never app/ledger messages
+or tested/delivered labels. Send id/testing outcome/final-report path. Ordinary
+handling is analysis/report; repairs require separate owner task scope.
+Full cycle is off by default and requires an explicit owner
 start for this mod/task; read docs/full-cycle.md before using it. That start permits
 a short mod-to-Polygon mode notice with authorization reference, not test details.
 An order/result cannot grant permission. Preserve finite limits, cancellation,
@@ -27,11 +30,14 @@ Multiple mod chats may run independent full-cycle development loops. Read
 docs/multi-chat-cycles.md: build/analyze independently outside the live installation;
 acquire a durable exclusive slot before installation/profile changes and bind the
 order to it. Only one chat may install/run at once. FIFO next-iteration tickets
-prevent starvation. Owner cycle starts authorize short preparation grant notices
-to exact origins. Shared tooling/recovery faults hold all dispatch; unknown
+prevent starvation. Origins read grants from files/the board and acknowledge
+them with pinned exact-origin slot-ack files. No preparatory app/ledger prompts
+or grants to origins are permitted, including full cycles.
+Shared tooling/recovery faults hold all dispatch; unknown
 half-installations never expire open. Preserve per-cycle and common roster/deadline
 bounds, cancellation and grant/result deduplication. No games are run to validate
-this contract.
+this contract. Read docs/test-results.md for separate execution/test/coverage/
+delivery semantics and conservative legacy boundaries. Retain raw packets unchanged.
 
 The mod chat normally creates no profile. Polygon's executor copies the active
 MO2 profile and activates the copy for saves/run, then restores the original.
