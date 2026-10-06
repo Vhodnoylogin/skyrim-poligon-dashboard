@@ -1,6 +1,11 @@
 # Skyrim-Poligon-Dashboard development
 
 Read README.md before editing. This is a chat service and dashboard, not a game mod.
+New automatic mod orders use schemaVersion2 and docs/subject-platform.md. Origins
+pin subject/game dependencies/fixture only and declare semantic actions/checks.
+Polygon owns tool selection, qualification and immutable per-attempt platform pins.
+Tool updates never require a new queued mod order, fake a mod build or reset budgets.
+Preserve original schemaVersion1 orders unchanged, including their old pin checks.
 Maintain polygon.py, board.html, their tests and the agent contract in this repo.
 Preserve queue compatibility, the single game-session barrier, input pins, honest
 unavailable domains and receipt-based delivery. Never run automatic tests, restart
@@ -54,7 +59,7 @@ its temporary MO2 entry. Recover interrupted sessions first; preserve originals.
 Keep external executors, drivers, game files, credentials, runtime configs,
 databases, evidence and speech recordings outside Git. Document how to acquire
 dependencies. Use Python 3.11+ standard library for runtime and tests. Check
-`python -m unittest discover -s . -p test_polygon.py -v` after relevant changes.
+`python -m unittest discover -s . -p "test_*.py" -v` after relevant changes.
 Verify the Git remote and name the repository before committing/pushing.
 In the owner's Skyrim VR project, reports and repository maps stay in its journal;
 use that journal's save.py for journal changes, regular Git for this business repo.

@@ -7,6 +7,12 @@ findings and prepares the next order without renewing repair approval merely
 because the test was manual or single-run. Launch permission remains separate.
 This contract is not a cycle start. Installing it registers or runs no cycle.
 
+Automatic mod orders use schemaVersion2 (docs/subject-platform.md). Mod build and
+scenario progress compare subject pins/content; Polygon's separate platform plan
+does not participate. A provider/executor update alone cannot count as a mod fix,
+scenario correction or refreshed budget. Queued subject orders remain immutable
+and usable after qualified tool replacement. Completed/blocked tickets stay closed.
+
 ## Authority and scope
 
 Only a direct human owner instruction explicitly starting a full cycle for a

@@ -99,7 +99,22 @@ manifest. No external dependency binaries/source belong in this repository.
 The optional skill validator uses PyYAML6.0.2 from PyPI in an external temporary
 validation directory; Polygon's runtime is Python standard library only.
 
-## Automatic order
+## Automatic subject order
+
+New mod orders use **schemaVersion2**: installed subject/dependency/fixture pins,
+an embedded `subjectPlan` using `polygon-actions/1`, factual testing boundaries and
+exact origin. Read [docs/subject-platform.md](docs/subject-platform.md) for the
+complete origin example and platform contract. Origins do not pin DevBench,
+executor/observer/driver versions or provide runner configuration. Polygon freezes
+and verifies a separately qualified platform plan for each attempt. A tool update
+does not require a new queued mod order or a new mod build. Unsupported/unqualified
+platforms refuse preparation honestly. No tool change grants another launch.
+
+## Retained schemaVersion1 orders
+
+The following is the original format for compatibility, assisted orders and
+dedicated executor qualification tests. Do not use it to create new automatic mod
+orders. Retained orders keep their original pins/config and are never rewritten.
 
 ```json
 {
@@ -298,7 +313,7 @@ Chat consumers analyze only their own returned packet, not other chats' journals
 ## Verification
 
 ```text
-python -m unittest discover -s <repository> -p test_polygon.py -v
+python -m unittest discover -s <repository> -p "test_*.py" -v
 ```
 
 Queue/recovery boundaries are tested with isolated temporary files; these checks
@@ -329,7 +344,8 @@ host config's dashboardRepository, preserving the existing runtime directory.
 - DevBench: https://github.com/alandtse/devbench . Install a compatible VR build;
   configure the actual runtime metadata paths, never a guessed HTTP port.
 - Optional World Observer: https://github.com/Vhodnoylogin/skyrim-world-observer .
-  Acquire/build/install separately and pin the installed DLL for relevant orders.
+  Polygon acquires/builds/installs and qualifies/pins its provider in the separate
+  attempt platform manifest; a mod origin declares observations through the interface.
 - Optional headset speech: use the Skyrim VR project's independent asr-listen.py
   and knowledge/voice-channel.md, or obtain that integration from the owner.
   It is not bundled/publicly downloadable as part of this repository.

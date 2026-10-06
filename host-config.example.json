@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "executor": "ABSOLUTE-EXTERNAL-EXECUTOR-DIRECTORY",
+  "platformManifest": "ABSOLUTE-POLYGON-OWNED-QUALIFIED-PLATFORM-MANIFEST.json",
   "threadId": "ACTUAL-SKYRIM-POLYGON-THREAD-ID",
   "journalChat": "skyrim-polygon",
   "boardUrl": "http://127.0.0.1:8934/",

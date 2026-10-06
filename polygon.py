@@ -23,6 +23,9 @@ from urllib.request import Request, urlopen
 import uuid
 
 HERE = Path(__file__).resolve().parent
+# The journal compatibility entrypoint uses runpy rather than a package import.
+sys.path.insert(0, str(HERE))
+import subject_contract
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 SHA = re.compile(r"[0-9a-f]{64}")
 READ_KINDS = {"state", "player", "refs", "scene", "vm", "world_observer"}
@@ -101,6 +104,8 @@ class Polygon:
             CREATE TABLE IF NOT EXISTS events (
               seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, at REAL, status TEXT, note TEXT);
             CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, started REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS platform_attempts (
+              id TEXT PRIMARY KEY, plan TEXT NOT NULL, sha256 TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS cycles (
               id TEXT PRIMARY KEY, authorization TEXT NOT NULL,
               status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '');
@@ -473,10 +478,10 @@ class Polygon:
         if analysis.get("changeKind", "mod") == "scenario":
             if cycle["buildId"] != request["cycle"]["buildId"] or sorted((p["path"], p["sha256"]) for p in order["inputs"]) != sorted((p["path"], p["sha256"]) for p in request["inputs"]):
                 raise ValueError("Scenario-only correction must retain the actual build and installed inputs")
-            if all(order.get(k) == request.get(k) for k in ("scenarioData", "resolvedConfig", "testing", "observations", "playerSteps")):
+            if all(order.get(k) == request.get(k) for k in ("subjectPlan", "scenarioData", "resolvedConfig", "testing", "observations", "playerSteps")):
                 raise ValueError("Scenario-only correction requires changed test content")
         elif analysis.get("changeKind", "mod") == "mod":
-            if cycle["buildId"] == request["cycle"]["buildId"] or sorted(p["sha256"] for p in order["inputs"]) == sorted(p["sha256"] for p in request["inputs"]):
+            if cycle["buildId"] == request["cycle"]["buildId"] or subject_contract.build_hashes(order) == subject_contract.build_hashes(request):
                 raise ValueError("Fix iteration requires a new build id and installed input hashes")
         else:
             raise ValueError("Decision changeKind must be mod or scenario")
@@ -566,8 +571,21 @@ class Polygon:
     def submit(self, path):
         path = Path(path).resolve()
         order = read(path)
-        if order.get("schemaVersion") != 1 or not SAFE_ID.fullmatch(order.get("id", "")):
-            raise ValueError("schemaVersion1 and safe id required")
+        if order.get("schemaVersion") not in (1, 2) or not SAFE_ID.fullmatch(order.get("id", "")):
+            raise ValueError("schemaVersion1 or 2 and safe id required")
+        modern = order["schemaVersion"] == 2
+        if modern:
+            allowed = {"schemaVersion", "id", "mode", "subject", "sourceChat", "sourceThreadId", "profile", "purpose", "inputs", "collect", "subjectPlan", "testing", "cycle", "profileSelection"}
+            if set(order) - allowed or order.get("mode") != "automatic":
+                raise ValueError("Schema2 is an automatic subject order; platform configuration belongs to Polygon")
+            subject_contract.validate(order.get("subjectPlan"))
+            self.validate_testing(order.get("testing"))
+            if order.get("testing") is None:
+                raise ValueError("Schema2 requires factual testing boundary and checks")
+            names = {s["name"] for s in order["subjectPlan"]["steps"]}
+            testing = order["testing"]
+            if testing["start"].get("kind") != "check" or not testing.get("checks") or testing["start"].get("name") not in names or any(c["name"] not in names for c in testing["checks"]):
+                raise ValueError("Testing boundary/checks must name subject plan checkpoints")
         for key in ("subject", "sourceChat", "sourceThreadId", "profile", "purpose"):
             required_string(order, key)
         if order.get("mode") not in ("automatic", "assisted"):
@@ -581,10 +599,15 @@ class Polygon:
         for pin in pins:
             if not isinstance(pin, dict) or not SHA.fullmatch(pin.get("sha256", "")):
                 raise ValueError("Every input needs path and lowercase sha256")
+            if modern and (set(pin) != {"path", "sha256", "role"} or pin.get("role") not in ("subject", "dependency", "fixture")):
+                raise ValueError("Schema2 pins need subject/dependency/fixture role; platform tools belong to the attempt")
             pin["path"] = str((path.parent / required_string(pin, "path")).resolve())
             if not Path(pin["path"]).is_file() or digest(pin["path"]) != pin["sha256"]:
                 raise ValueError("Missing/changed pinned input: " + pin["path"])
-        if order["mode"] == "automatic":
+        if modern:
+            if not any(p["role"] == "subject" for p in pins):
+                raise ValueError("Pin at least one actual subject file")
+        elif order["mode"] == "automatic":
             config = (path.parent / required_string(order, "config")).resolve()
             from_location, validate = self.executor()
             from skyrim_autotest.config import load
@@ -891,12 +914,123 @@ class Polygon:
         return registered, next(e for e in report["orders"] if e["orderId"] == row["id"])
 
     def runtime_pins(self, order):
+        if order.get("schemaVersion") == 2:
+            return self.attempt_plan(order)["pins"]
         pins = [{"path": str(p), "sha256": digest(p)} for p in sorted((self.executor()[0] / "skyrim_autotest").iterdir()) if p.is_file() and p.suffix in (".py", ".h", ".json")]
         return pins
 
+    def attempt_plan(self, order):
+        with self.connect() as con:
+            row = con.execute("SELECT * FROM platform_attempts WHERE id=?", (order["id"],)).fetchone()
+        if not row:
+            raise ValueError("No frozen platform attempt")
+        plan = json.loads(row["plan"])
+        if subject_contract.identity(plan) != row["sha256"] or plan["subjectOrderSha256"] != subject_contract.identity(order):
+            raise ValueError("Platform attempt/order provenance changed")
+        return plan
+
+    def prepare_platform(self, order):
+        """Freeze a qualified platform separately, after claim and before side effects."""
+        with self.connect() as con:
+            existing = con.execute("SELECT id FROM platform_attempts WHERE id=?", (order["id"],)).fetchone()
+        if existing:
+            return self.verify_platform(order)
+        manifest_path = Path(required_string(self.host(), "platformManifest")).resolve()
+        pins = []
+        def pin_file(path, expected=None):
+            path = Path(path).resolve()
+            actual = digest(path)
+            if expected is not None and (not SHA.fullmatch(expected) or actual != expected):
+                raise ValueError("Platform qualification pin mismatch: " + str(path))
+            pin = {"path": str(path), "sha256": actual}
+            if pin not in pins: pins.append(pin)
+        pin_file(manifest_path)
+        manifest = read(manifest_path)
+        if manifest.get("schemaVersion") != 1 or manifest.get("interface") != subject_contract.INTERFACE:
+            raise ValueError("Incompatible platform interface")
+        qualification_pin = manifest.get("qualification", {})
+        qualification_path = (manifest_path.parent / required_string(qualification_pin, "path")).resolve()
+        pin_file(qualification_path, required_string(qualification_pin, "sha256"))
+        qualification = read(qualification_path)
+        for key in ("verifiedBy", "reason"):
+            required_string(qualification, key)
+        if qualification.get("qualified") is not True or qualification.get("interface") != subject_contract.INTERFACE or qualification.get("operations") != manifest.get("operations"):
+            raise ValueError("Platform semantics require actual operator-reviewed qualification")
+        tools = manifest.get("inputs")
+        if not isinstance(tools, list) or not tools:
+            raise ValueError("Platform must pin its installed providers")
+        for tool in tools:
+            pin_file(manifest_path.parent / required_string(tool, "path"), required_string(tool, "sha256"))
+        executor, validate = self.executor()
+        for p in sorted((executor / "skyrim_autotest").rglob("*")):
+            if p.is_file() and p.suffix in (".py", ".h", ".json"): pin_file(p)
+        if not (executor / "run.py").is_file():
+            raise ValueError("Platform executor entrypoint unavailable")
+        pin_file(executor / "run.py")
+        # Qualification covers exact providers, executor and mapping, not just version strings.
+        qualified_pins = qualification.get("pins")
+        actual_pins = [p for p in pins if p["path"] not in (str(manifest_path), str(qualification_path))]
+        if not isinstance(qualified_pins, list) or sorted((p["path"], p["sha256"]) for p in qualified_pins) != sorted((p["path"], p["sha256"]) for p in actual_pins):
+            raise ValueError("Current platform tools lack exact-build qualification")
+        evidence = qualification.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError("Platform qualification needs factual evidence files")
+        for entry in evidence:
+            pin_file(qualification_path.parent / required_string(entry, "path"), required_string(entry, "sha256"))
+        config_path = (manifest_path.parent / required_string(manifest, "config")).resolve()
+        pin_file(config_path)
+        from skyrim_autotest.config import load
+        config = load(config_path)
+        if qualification.get("configurationSha256") != subject_contract.identity(config):
+            raise ValueError("Platform configuration lacks qualification")
+        scenario = subject_contract.compile_plan(order["subjectPlan"], manifest["operations"])
+        validate(scenario)
+        # Do not permit origin/provider overlap to masquerade as a changed mod build.
+        if {p["path"] for p in order["inputs"]} & {p["path"] for p in pins}:
+            raise ValueError("Subject inputs overlap platform tools; explicitly correct the new subject order")
+        plan = {"schemaVersion": 1, "orderId": order["id"], "subjectOrderSha256": subject_contract.identity(order),
+                "subjectSpecificationSha256": subject_contract.subject_identity(order),
+                "interface": subject_contract.INTERFACE, "executor": str(executor), "pins": pins,
+                "manifestPath": str(manifest_path),
+                "configuration": config, "scenario": scenario, "preparedAt": time.time(),
+                "qualification": {"path": str(qualification_path), "sha256": digest(qualification_path)}}
+        canonical = json.dumps(plan, ensure_ascii=False, sort_keys=True)
+        with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            if con.execute("SELECT status FROM jobs WHERE id=?", (order["id"],)).fetchone()[0] != "running":
+                raise ValueError("Platform preparation needs the claimed attempt")
+            con.execute("INSERT OR IGNORE INTO platform_attempts VALUES(?,?,?)", (order["id"], canonical, subject_contract.identity(plan)))
+        plan = self.verify_platform(order, require_file=False)
+        write(self.evidence_dir(order["id"]) / "platform-plan.json", plan)
+        return self.verify_platform(order)
+
+    def verify_platform(self, order, require_file=True):
+        plan = self.attempt_plan(order)
+        if require_file and read(self.evidence_dir(order["id"]) / "platform-plan.json") != plan:
+            raise ValueError("Retained platform plan file changed")
+        if str(Path(self.host()["executor"]).resolve()) != plan["executor"]:
+            raise ValueError("Platform executor selection changed after preparation")
+        if str(Path(self.host()["platformManifest"]).resolve()) != plan["manifestPath"]:
+            raise ValueError("Platform manifest selection changed after preparation")
+        actual = {str(p.resolve()) for p in (Path(plan["executor"]) / "skyrim_autotest").rglob("*") if p.is_file() and p.suffix in (".py", ".h", ".json")}
+        expected = {p["path"] for p in plan["pins"] if Path(p["path"]).is_relative_to(Path(plan["executor"]) / "skyrim_autotest")}
+        if actual != expected:
+            raise ValueError("Platform executor inventory changed after preparation")
+        for pin in plan["pins"]:
+            if digest(pin["path"]) != pin["sha256"]:
+                raise ValueError("Platform changed after preparation: " + pin["path"])
+        return plan
+
     def matching_runs(self, order):
         matches = []
-        runs = Path(order["resolvedConfig"]["runtime"]) / "runs"
+        if order.get("schemaVersion") == 2:
+            with self.connect() as con:
+                if not con.execute("SELECT id FROM platform_attempts WHERE id=?", (order["id"],)).fetchone():
+                    return []
+            config = self.attempt_plan(order)["configuration"]
+        else:
+            config = order["resolvedConfig"]
+        runs = Path(config["runtime"]) / "runs"
         for path in runs.glob("*/state.json"):
             state = read(path)
             if state.get("order", {}).get("id") == order["id"]:
@@ -916,6 +1050,11 @@ class Polygon:
             if result.get("restored") is not True or result.get("restoreErrors"):
                 findings.append({"component": "skyrim-autotest", "kind": "restoration_unverified", "details": result.get("restoreErrors"), "confirmed": True})
         order = json.loads(self.get(job)["request"])
+        if order.get("schemaVersion") == 2:
+            try:
+                self.verify_platform(order)
+            except (OSError, ValueError) as error:
+                findings.append({"component": "platform", "kind": "changed_build", "details": str(error), "confirmed": True})
         if order.get("cycle"):
             try:
                 if not run:
@@ -1016,6 +1155,12 @@ class Polygon:
                   "restored": restored, "files": files, "requestedData": order["collect"],
                   "analysis": None, "finishedAt": time.time()}
         packet["sourceProfile"] = order["profile"]
+        if order.get("schemaVersion") == 2:
+            packet["subjectOrderSha256"] = subject_contract.identity(order)
+            packet["subjectSpecificationSha256"] = subject_contract.subject_identity(order)
+            with self.connect() as con:
+                plan = con.execute("SELECT sha256 FROM platform_attempts WHERE id=?", (job,)).fetchone()
+            packet["platformPlanSha256"] = plan[0] if plan else None
         if order.get("cycle") is not None:
             packet["cycle"] = order["cycle"]
         packet_path = folder / "packet.json"
@@ -1063,9 +1208,14 @@ class Polygon:
         try:
             self.check_launch_authorization(order)
             self.verify_inputs(order)
+            if order.get("schemaVersion") == 2:
+                plan = self.prepare_platform(order)
+                config, scenario = plan["configuration"], plan["scenario"]
+            else:
+                config, scenario = order["resolvedConfig"], order["scenarioData"]
             write(folder / "executor-pins.json", self.runtime_pins(order))
-            write(folder / "config.json", order["resolvedConfig"])
-            write(folder / "scenario.json", order["scenarioData"])
+            write(folder / "config.json", config)
+            write(folder / "scenario.json", scenario)
             with (folder / "executor.log").open("w", encoding="utf-8") as log:
                 child = subprocess.run([sys.executable, str(HERE / "polygon.py"), "--root", str(self.root), "_execute", row["id"]],
                                        stdout=log, stderr=subprocess.STDOUT, shell=False)
@@ -1090,6 +1240,10 @@ class Polygon:
         order = json.loads(row["request"])
         self.check_launch_authorization(order)
         self.verify_inputs(order)
+        if order.get("schemaVersion") == 2:
+            plan = self.verify_platform(order)
+            if read(self.evidence_dir(job) / "config.json") != plan["configuration"] or read(self.evidence_dir(job) / "scenario.json") != plan["scenario"]:
+                raise ValueError("Materialized platform attempt changed")
         for pin in read(self.evidence_dir(job) / "executor-pins.json"):
             if digest(pin["path"]) != pin["sha256"]:
                 raise ValueError("Executor changed after claim")
@@ -1107,7 +1261,7 @@ class Polygon:
             return {"status": "no_active_automatic_order"}
         row = rows[0]
         order = json.loads(row["request"])
-        executor, _ = self.executor()
+        executor = Path(self.attempt_plan(order)["executor"]) if order.get("schemaVersion") == 2 else self.executor()[0]
         # Native runner recovery verifies live process ownership; never bypass it.
         result = subprocess.run([sys.executable, str(executor / "run.py"), "--config", str(self.evidence_dir(row["id"]) / "config.json"), "recover"], capture_output=True, text=True)
         if result.returncode:
@@ -1284,7 +1438,12 @@ class Polygon:
             result = []
             for row in rows:
                 item = {k: row[k] for k in ("id", "mode", "subject", "origin", "status", "submitted", "note", "packet", "delivery")}
-                cycle = json.loads(row["request"]).get("cycle")
+                request = json.loads(row["request"])
+                cycle = request.get("cycle")
+                item["orderSchemaVersion"] = request["schemaVersion"]
+                item["subjectSpecificationSha256"] = subject_contract.subject_identity(request) if request["schemaVersion"] == 2 else None
+                plan = con.execute("SELECT sha256 FROM platform_attempts WHERE id=?", (row["id"],)).fetchone()
+                item["platformPlanSha256"] = plan[0] if plan else None
                 item["workflow"] = "full-cycle" if cycle is not None else "standard"
                 item["cycleId"] = cycle["id"] if isinstance(cycle, dict) else None
                 item["awaitingOwnerStart"] = row["mode"] == "automatic" and row["status"] == "queued" and cycle is None and not con.execute("SELECT id FROM released_orders WHERE id=?", (row["id"],)).fetchone()
