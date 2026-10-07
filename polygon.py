@@ -27,6 +27,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import subject_contract
 from shared_sessions import SharedSessions
+from tooling_retries import ToolingRetries
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 SHA = re.compile(r"[0-9a-f]{64}")
 READ_KINDS = {"state", "player", "refs", "scene", "vm", "world_observer"}
@@ -116,7 +117,7 @@ def owner_evidence(approval, path, require_deadline=True):
     return evidence
 
 
-class Polygon(SharedSessions):
+class Polygon(SharedSessions, ToolingRetries):
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.local = self.root / "local/skyrim-polygon"
@@ -158,6 +159,7 @@ class Polygon(SharedSessions):
             """)
 
         self.init_sessions()
+        self.init_retries()
 
     @contextlib.contextmanager
     def connect(self):
@@ -309,7 +311,7 @@ class Polygon(SharedSessions):
                     result["status"] = "blocked"
                     return result
                 return self.slot_view(existing)
-            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone():
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone() or con.execute("SELECT id FROM retry_attempts WHERE status IN ('running','collecting')").fetchone():
                 return {"status": "game_busy"}
             # A manually released finite batch finishes before changing its installation.
             if con.execute("SELECT jobs.id FROM jobs JOIN released_orders ON jobs.id=released_orders.id WHERE jobs.status='queued'").fetchone():
@@ -351,7 +353,7 @@ class Polygon(SharedSessions):
             raise ValueError("Exact hold and reviewed shared environment required")
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone():
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone() or con.execute("SELECT id FROM retry_attempts WHERE status IN ('running','collecting')").fetchone():
                 raise ValueError("Recover active session before pipeline clearance")
             con.execute("DELETE FROM pipeline_holds WHERE id=?", (issue,))
             self.event(con, issue, "pipeline_cleared", json.dumps(evidence, sort_keys=True))
@@ -399,7 +401,7 @@ class Polygon(SharedSessions):
             row = con.execute("SELECT * FROM cycle_slots WHERE id=?", (slot,)).fetchone()
             if not row:
                 raise ValueError("Unknown slot")
-            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone():
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone() or con.execute("SELECT id FROM retry_attempts WHERE status IN ('running','collecting')").fetchone():
                 raise ValueError("Recover active game before clearing installation slot")
             order = con.execute("SELECT status FROM jobs WHERE id=?", (row["order_id"],)).fetchone()
             if order and order["status"] == "queued":
@@ -562,7 +564,7 @@ class Polygon(SharedSessions):
         else:
             raise ValueError("Exclusive profile needs owner or cycle-origin authority")
 
-    def source_profile(self, order, runner):
+    def source_profile(self, order, runner, output_dir=None):
         """Read actual MO2 selection; the runner creates/activates its own copy."""
         self.validate_profile_selection(order)
         if order.get("profileSelection", {}).get("mode") == "exclusive":
@@ -582,7 +584,7 @@ class Polygon(SharedSessions):
                 raise ValueError("Read the active MO2 profile through its bridge; unsupported INI encoding")
         if selected != order["profile"] or Path(selected).name != selected or selected in (".", ".."):
             raise ValueError("Active profile differs from order provenance; prepare a new order")
-        write(self.evidence_dir(order["id"]) / "profile-selection.json",
+        write((Path(output_dir) if output_dir else self.evidence_dir(order["id"])) / "profile-selection.json",
               {"sourceProfile": selected, "selection": order.get("profileSelection", {"mode": "active"}),
                "copyOwner": "skyrim-autotest", "originalProfilePreserved": True})
         return selected
@@ -696,7 +698,7 @@ class Polygon(SharedSessions):
             con.execute("BEGIN IMMEDIATE")
             if con.execute("SELECT id FROM pipeline_holds").fetchone():
                 return None
-            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone():
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone() or con.execute("SELECT id FROM retry_attempts WHERE status IN ('running','collecting')").fetchone():
                 return None
             if job:
                 if con.execute("SELECT id FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone():
@@ -858,6 +860,8 @@ class Polygon(SharedSessions):
     def report_ready(self, path):
         """Finalize evidence after testing/collection; raw packets stay immutable."""
         request = read(Path(path).resolve())
+        if "attemptId" in request:
+            return self.retry_report_ready(path)
         if request.get("schemaVersion") != 1 or not SAFE_ID.fullmatch(request.get("id", "")):
             raise ValueError("Final report requires schemaVersion1 and safe id")
         required_string(request, "summary")
@@ -976,9 +980,10 @@ class Polygon(SharedSessions):
         pins = [{"path": str(p), "sha256": digest(p)} for p in sorted((self.executor()[0] / "skyrim_autotest").iterdir()) if p.is_file() and p.suffix in (".py", ".h", ".json")]
         return pins
 
-    def attempt_plan(self, order):
+    def attempt_plan(self, order, attempt_id=None):
+        key = attempt_id or order["id"]
         with self.connect() as con:
-            row = con.execute("SELECT * FROM platform_attempts WHERE id=?", (order["id"],)).fetchone()
+            row = con.execute("SELECT * FROM platform_attempts WHERE id=?", (key,)).fetchone()
         if not row:
             raise ValueError("No frozen platform attempt")
         plan = json.loads(row["plan"])
@@ -986,12 +991,14 @@ class Polygon(SharedSessions):
             raise ValueError("Platform attempt/order provenance changed")
         return plan
 
-    def prepare_platform(self, order):
+    def prepare_platform(self, order, attempt_id=None):
         """Freeze a qualified platform separately, after claim and before side effects."""
+        platform_key = attempt_id or order["id"]
+        folder = self.local / "retry-attempts" / platform_key if attempt_id else self.evidence_dir(platform_key)
         with self.connect() as con:
-            existing = con.execute("SELECT id FROM platform_attempts WHERE id=?", (order["id"],)).fetchone()
+            existing = con.execute("SELECT id FROM platform_attempts WHERE id=?", (platform_key,)).fetchone()
         if existing:
-            return self.verify_platform(order)
+            return self.verify_platform(order, attempt_id=attempt_id)
         manifest_path = Path(required_string(self.host(), "platformManifest")).resolve()
         pins = []
         def pin_file(path, expected=None):
@@ -1054,16 +1061,18 @@ class Polygon(SharedSessions):
         canonical = json.dumps(plan, ensure_ascii=False, sort_keys=True)
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            if con.execute("SELECT status FROM jobs WHERE id=?", (order["id"],)).fetchone()[0] not in ("running", "session_waiting"):
+            table = "retry_attempts" if attempt_id else "jobs"
+            if con.execute("SELECT status FROM " + table + " WHERE id=?", (platform_key,)).fetchone()[0] not in ("running", "session_waiting"):
                 raise ValueError("Platform preparation needs the claimed attempt")
-            con.execute("INSERT OR IGNORE INTO platform_attempts VALUES(?,?,?)", (order["id"], canonical, subject_contract.identity(plan)))
-        plan = self.verify_platform(order, require_file=False)
-        write(self.evidence_dir(order["id"]) / "platform-plan.json", plan)
-        return self.verify_platform(order)
+            con.execute("INSERT OR IGNORE INTO platform_attempts VALUES(?,?,?)", (platform_key, canonical, subject_contract.identity(plan)))
+        plan = self.verify_platform(order, require_file=False, attempt_id=attempt_id)
+        write(folder / "platform-plan.json", plan)
+        return self.verify_platform(order, attempt_id=attempt_id)
 
-    def verify_platform(self, order, require_file=True):
-        plan = self.attempt_plan(order)
-        if require_file and read(self.evidence_dir(order["id"]) / "platform-plan.json") != plan:
+    def verify_platform(self, order, require_file=True, attempt_id=None):
+        plan = self.attempt_plan(order, attempt_id)
+        folder = self.local / "retry-attempts" / attempt_id if attempt_id else self.evidence_dir(order["id"])
+        if require_file and read(folder / "platform-plan.json") != plan:
             raise ValueError("Retained platform plan file changed")
         if str(Path(self.host()["executor"]).resolve()) != plan["executor"]:
             raise ValueError("Platform executor selection changed after preparation")
@@ -1255,7 +1264,7 @@ class Polygon(SharedSessions):
         """An interrupted order is never automatically requeued or rerun."""
         with self.connect() as con:
             rows = con.execute("SELECT * FROM jobs WHERE status='running' AND mode='automatic'").fetchall()
-        reconciled = self.reconcile_shared()
+        reconciled = self.reconcile_shared() + self.reconcile_retries()
         for row in rows:
             if self.member_session(row["id"]):
                 continue
@@ -1271,6 +1280,9 @@ class Polygon(SharedSessions):
 
     def execute_next(self):
         self.reconcile()
+        retry = self.claim_retry()
+        if retry:
+            return self.execute_retry(retry)
         shared = self.claim_shared()
         if shared:
             return self.execute_shared(shared)
@@ -1332,6 +1344,10 @@ class Polygon(SharedSessions):
 
     def recover_active(self):
         with self.connect() as con:
+            retry = con.execute("SELECT * FROM retry_attempts WHERE status IN ('running','collecting')").fetchone()
+        if retry:
+            return self.recover_retry(dict(retry))
+        with self.connect() as con:
             rows = con.execute("SELECT * FROM jobs WHERE status='running' AND mode='automatic'").fetchall()
         if not rows:
             with self.connect() as con:
@@ -1343,6 +1359,17 @@ class Polygon(SharedSessions):
         row = rows[0]
         order = json.loads(row["request"])
         session = self.member_session(row["id"])
+        if session and not self.matching_runs(order):
+            with self.connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                ids = json.loads(session["request"])["orderIds"]
+                dispatched = con.execute("SELECT id FROM attempts WHERE id IN (" + ",".join("?" for _ in ids) + ")", ids).fetchone()
+                if not dispatched:
+                    con.execute("UPDATE game_sessions SET status='finalizing' WHERE id=?", (session["id"],))
+            if not dispatched:
+                return self.finish_shared(session["id"], reason="Interrupted before shared native dispatch")
+            if not (self.local / "sessions" / session["id"] / "child-exit.json").is_file():
+                return {"status": "worker_completion_unproven", "reason": "Shared child may still start; retain session barrier"}
         if session and session["status"] == "preparing" and not session["plan"]:
             # The shared child requires running+frozen plan; preparation cannot launch.
             return self.finish_shared(session["id"], reason="Interrupted during shared preparation before dispatch")
@@ -1504,9 +1531,13 @@ class Polygon(SharedSessions):
                             "report": registered["path"], "reportSha256": registered["sha256"],
                             "testOutcome": entry["testResult"]["outcome"],
                             "text": f"Skyrim-Polygon order {row['id']}: {entry['testResult']['outcome']}. Completed testing report: {registered['path']}. Read and analyze once. Repairs require the owner's task scope; further testing requires a separate launch authorization or an active bounded full cycle."})
-        return out
+        return out + self.pending_retries()
 
     def delivered(self, job, receipt):
+        with self.connect() as con:
+            retry = con.execute("SELECT id FROM retry_attempts WHERE id=?", (job,)).fetchone()
+        if retry:
+            return self.retry_delivered(job, receipt)
         if not isinstance(receipt, str) or not receipt.strip():
             raise ValueError("Verified delivery receipt required")
         with self.connect() as con:
@@ -1553,7 +1584,7 @@ class Polygon(SharedSessions):
                     item["coverage"] = entry["testResult"]["coverage"]
                     item["finalReport"] = registered["path"]
                 result.append(item)
-        return result
+        return result + self.retry_board()
 
     def serve(self, port):
         polygon = self
@@ -1583,6 +1614,10 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     submit = sub.add_parser("submit")
     submit.add_argument("order", type=Path)
+    retry = sub.add_parser("retry-register", help="One reviewed pre-subject tooling attempt; original subject order is unchanged")
+    retry.add_argument("request", type=Path)
+    for name in ("retry-show", "_execute-retry"):
+        sub.add_parser(name).add_argument("id")
     session = sub.add_parser("session-register", help="Group compatible prepared orders; launch authority remains separate")
     session.add_argument("request", type=Path)
     for command in ("session-show", "session-cancel", "_execute-session"):
@@ -1638,6 +1673,9 @@ def main(argv=None):
     try:
         polygon = Polygon(session_root(args.root))
         if args.command == "submit": result = polygon.submit(args.order)
+        elif args.command == "retry-register": result = polygon.register_retry(args.request)
+        elif args.command == "retry-show": result = polygon.retry_show(args.id)
+        elif args.command == "_execute-retry": return polygon.child_retry(args.id)
         elif args.command == "session-register": result = polygon.register_session(args.request)
         elif args.command == "session-cancel": result = polygon.cancel_session(args.id)
         elif args.command == "session-show": result = polygon.session_show(args.id)

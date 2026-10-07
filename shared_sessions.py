@@ -110,6 +110,8 @@ class SharedSessions:
             con.execute('BEGIN IMMEDIATE')
             if con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone():
                 return {'busy': True}
+            if con.execute("SELECT id FROM retry_attempts WHERE status IN ('running','collecting')").fetchone():
+                return {'busy': True}
             if (con.execute('SELECT id FROM pipeline_holds').fetchone() or
                 con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or
                 con.execute("SELECT id FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone()):
@@ -240,6 +242,8 @@ class SharedSessions:
         # UNIQUE attempts make replay of a claimed child refuse before another launch.
         with self.connect() as con:
             con.execute('BEGIN IMMEDIATE')
+            if con.execute('SELECT status FROM game_sessions WHERE id=?', (session_id,)).fetchone()[0] != 'running':
+                raise ValueError('Shared ownership changed before native dispatch')
             for order in orders:
                 con.execute('INSERT INTO attempts VALUES(?,?)', (order['id'], time.time()))
         return runner.run(orders[0]['profile'], folder / 'scenario.json', restart_idle_mo2=True,
@@ -258,6 +262,7 @@ class SharedSessions:
         with (folder / 'executor.log').open('w', encoding='utf-8') as log:
             child = subprocess.run([sys.executable, str(Path(__file__).with_name('polygon.py')), '--root', str(self.root), '_execute-session', session_id],
                                    stdout=log, stderr=subprocess.STDOUT, shell=False)
+        m.write(folder / 'child-exit.json', {'returncode': child.returncode})
         self.reconcile_shared()
         if self.session_show(session_id)['status'] == 'complete':
             return {'sessionId': session_id, 'status': 'complete', 'orders': [self.get(i) for i in claimed['orderIds']]}

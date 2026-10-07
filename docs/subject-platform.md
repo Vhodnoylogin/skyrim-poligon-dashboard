@@ -124,6 +124,11 @@ cover the platform plan. Tool findings remain distinct from subject acceptance.
 
 ## Compatibility and retries
 
+The explicit pre-subject tooling continuation API is retry-register, documented
+in [tooling-retries.md](tooling-retries.md). It binds a separate frozen attempt
+to the unchanged original subject and preserves every old packet/platform plan.
+It never creates automatic repeat permission or mod/scenario progress.
+
 SchemaVersion1 orders retain their original inputs/config/scenario interpretation,
 DB contents, packets and receipts. Assisted and dedicated control-chain qualification
 orders can continue using schema1. Never strip, rehash or rewrite a retained order.

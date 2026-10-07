@@ -1,6 +1,10 @@
 # Skyrim-Poligon-Dashboard development
 
 Read README.md before editing. This is a chat service and dashboard, not a game mod.
+For tooling-only pre-subject continuation read docs/tooling-retries.md. retry-register
+creates a separate attempt with unchanged subject/old evidence, reviewed restoration,
+qualified current platform and independently verified owner permission. Never requeue
+an ended job, clone a subject order, reset counts or clear a hold to simulate retry.
 Return each independent order's verified completed report promptly to its exact
 sourceThreadId, without waiting for unrelated mods in its batch/group/queue.
 After each completion process eligible outbox entries; delivered requires the

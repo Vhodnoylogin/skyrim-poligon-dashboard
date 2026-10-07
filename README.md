@@ -103,6 +103,11 @@ validation directory; Polygon's runtime is Python standard library only.
 
 ## Automatic subject order
 
+For a confirmed tooling failure before factual subject testing, the operator may
+register a separate reviewed retry attempt without changing the mod order. See
+[tooling-retries.md](docs/tooling-retries.md) for proof, owner authority, qualified
+platform, FIFO, restoration and independent report/receipt gates. No automatic retry.
+
 New mod orders use **schemaVersion2**: installed subject/dependency/fixture pins,
 an embedded `subjectPlan` using `polygon-actions/1`, factual testing boundaries and
 exact origin. Read [docs/subject-platform.md](docs/subject-platform.md) for the
