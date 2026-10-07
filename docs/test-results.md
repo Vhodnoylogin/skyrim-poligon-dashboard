@@ -118,3 +118,17 @@ Before report finalization, board testOutcome is null; queue/game activity canno
 display 'tested'. A suppressed final decision retains testingLifecycle=not_started.
 Only proven started-and-ended attempts receive testingLifecycle=completed and a
 final testing outcome. This does not certify mod acceptance or authorize repeats.
+
+## Raw provider log pins
+
+New raw packets include `run/evidence/manifest.json` and each exact file declared
+by that executor collection manifest, after name/path/hash validation. This makes
+native mod logs and SteamVR `.txt` logs usable directly in report-ready dataCoverage
+citations. Unlisted files, backups and saves remain excluded. Missing legacy
+manifests are tolerated; a present malformed manifest, changed log or escaping
+path blocks new packet creation. Existing raw packets are never regenerated to
+add these pins; separately retained supplementary manifests remain historical.
+
+This collection fix changes neither assertion outcomes nor measurement quality.
+An observed action remains an observation. Sampled holding does not establish
+uninterrupted holding during unobserved intervals.

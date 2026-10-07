@@ -16,6 +16,40 @@ spec.loader.exec_module(mod)
 
 
 class Tests(unittest.TestCase):
+    def test_packet_pins_manifest_declared_logs_but_not_backups(self):
+        self.automatic_submit()
+        run = self.root / 'runtime/runs/logs'
+        log = run / 'evidence' / 'vrserver.txt'
+        log.parent.mkdir(parents=True)
+        log.write_bytes(b'raw SteamVR data')
+        (log.parent / 'unlisted-private.txt').write_bytes(b'not declared')
+        backup = run / 'backups' / 'private.json'
+        mod.write(backup, {'secret': 'excluded'})
+        mod.write(log.parent / 'manifest.json', [{'name': log.name, 'sha256': mod.digest(log)}])
+        mod.write(run / 'state.json', {'id': 'logs', 'done': True, 'restored': True,
+                                      'restoreErrors': [], 'snapshots': []})
+        mod.write(run / 'result.json', {'checks': [], 'result': 'failed',
+                                       'restored': True, 'restoreErrors': []})
+        packet = self.p.finish('test-1', 'failed', 'test fixture', run, True)
+        paths = {Path(p['path']) for p in packet['files']}
+        self.assertIn(log, paths)
+        self.assertIn(log.parent / 'manifest.json', paths)
+        self.assertNotIn(backup, paths)
+        self.assertNotIn(log.parent / 'unlisted-private.txt', paths)
+
+    def test_raw_logs_tampering_and_traversal_refuse_packaging(self):
+        run = self.root / 'runtime/runs/logs'
+        log = run / 'evidence' / 'mod.log'
+        log.parent.mkdir(parents=True)
+        log.write_bytes(b'original')
+        mod.write(log.parent / 'manifest.json', [{'name': log.name, 'sha256': mod.digest(log)}])
+        log.write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            mod.raw_evidence_pins(run)
+        mod.write(log.parent / 'manifest.json', [{'name': '../private.json', 'sha256': '0' * 64}])
+        with self.assertRaisesRegex(ValueError, 'Unsafe'):
+            mod.raw_evidence_pins(run)
+
     def final_fixture(self, checks, reason="", outcome="failed", restored=True):
         self.automatic_submit()
         self.order["testing"]["checks"].append({"name": "later-check", "role": "subject"})

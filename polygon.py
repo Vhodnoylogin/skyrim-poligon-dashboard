@@ -54,6 +54,35 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def raw_evidence_pins(run):
+    """Pin only the executor's declared collected files, never backups/saves."""
+    root = Path(run) / "evidence"
+    manifest = root / "manifest.json"
+    if not manifest.exists():
+        return []
+    def linked(p):
+        return p.is_symlink() or bool(getattr(p.lstat(), "st_file_attributes", 0) & 0x400)
+    if linked(root) or linked(manifest):
+        raise ValueError("Raw evidence directory/manifest is a link")
+    entries = read(manifest)
+    if not isinstance(entries, list):
+        raise ValueError("Invalid raw evidence manifest")
+    pins = [{"path": str(manifest), "sha256": digest(manifest), "bytes": manifest.stat().st_size}]
+    seen = {"manifest.json"}
+    for entry in entries:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if (not isinstance(name, str) or not name or name in (".", "..")
+                or "/" in name or "\\" in name or ":" in name or name.casefold() in seen):
+            raise ValueError("Unsafe/duplicate raw evidence name")
+        path = root / name
+        if (not path.is_file() or linked(path) or path.resolve().parent != root.resolve()
+                or digest(path) != entry.get("sha256")):
+            raise ValueError("Raw evidence is missing, changed or escaping its directory")
+        seen.add(name.casefold())
+        pins.append({"path": str(path), "sha256": entry["sha256"], "bytes": path.stat().st_size})
+    return pins
+
+
 def write(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1148,6 +1177,8 @@ class Polygon:
             for p in directory.iterdir():
                 if p.is_file() and p.name != "packet.json" and p.suffix in (".json", ".jsonl", ".log"):
                     files.append({"path": str(p), "sha256": digest(p), "bytes": p.stat().st_size})
+        if run:
+            files.extend(raw_evidence_pins(run))
         packet = {"schemaVersion": 1, "orderId": job, "mode": order["mode"],
                   "sourceChat": order["sourceChat"], "sourceThreadId": order["sourceThreadId"],
                   "subject": order["subject"], "executionOutcome": outcome,
