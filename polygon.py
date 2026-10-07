@@ -835,6 +835,8 @@ class Polygon(SharedSessions, ToolingRetries):
 
     @staticmethod
     def verify_packet(row):
+        if not row["packet"]:
+            raise ValueError(f"Order {row['id']}: missing packet; evidence review/reconciliation required before delivery")
         packet = read(row["packet"])
         order = json.loads(row["request"])
         if packet.get("orderId") != row["id"] or any(packet.get(k) != order[k] for k in ("sourceChat", "sourceThreadId")):
@@ -1509,13 +1511,36 @@ class Polygon(SharedSessions, ToolingRetries):
             child = subprocess.Popen([sys.executable, str(script), "--device", device, "--wake", "Р С—Р С•Р В»Р С‘Р С–Р С•Р Р…", "--heartbeat", "0"], stdout=log, stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
         return {"pid": child.pid, "device": device, "wakeWord": "Р С—Р С•Р В»Р С‘Р С–Р С•Р Р…", "healthRequired": "http://127.0.0.1:8931/api/health", "notice": "Launch is not microphone qualification; verify health and an actual spoken phrase. Existing listener ownership is respected."}
 
+    def unexecuted_terminal(self, con, row, decision):
+        """Recognize retained pre-launch withdrawals, never infer from note prose."""
+        if (row["status"] != "blocked" or row["packet"] is not None or decision
+                or row["delivery"] is not None or row["mailbox_id"] is not None):
+            return False
+        events = con.execute("SELECT status,note FROM events WHERE id=? ORDER BY seq", (row["id"],)).fetchall()
+        initial = "queued" if row["mode"] == "automatic" else "waiting_player"
+        if (len(events) != 2 or [e["status"] for e in events] != [initial, "blocked"]
+                or not row["note"].strip() or events[-1]["note"] != row["note"]):
+            return False
+        for table, key in (("attempts", "id"), ("platform_attempts", "id"), ("session_members", "order_id")):
+            if con.execute(f"SELECT 1 FROM {table} WHERE {key}=?", (row["id"],)).fetchone():
+                return False
+        # Normal automatic/assisted execution creates this directory before work.
+        # An orphan directory is ambiguous and requires review, even without a packet.
+        return not self.evidence_dir(row["id"]).exists()
+
     def pending(self):
         with self.connect() as con:
             rows = con.execute("SELECT * FROM jobs WHERE status IN ('recorded','blocked') AND delivery IS NULL ORDER BY submitted").fetchall()
             out = []
             for row in rows:
-                self.verify_packet(row)
                 decision = con.execute("SELECT eligibility FROM notification_results WHERE id=?", (row["id"],)).fetchone()
+                if self.unexecuted_terminal(con, row, decision):
+                    continue
+                try:
+                    self.verify_packet(row)
+                except (ValueError, OSError, TypeError, KeyError) as error:
+                    raise ValueError(f"Outbox order {row['id']}: packet verification failed ({error}); "
+                                     "review retained evidence/reconcile; no delivery permitted") from error
                 if not decision or decision["eligibility"] != "eligible":
                     continue
                 # Pending same-origin work suppresses discovery until its completion.

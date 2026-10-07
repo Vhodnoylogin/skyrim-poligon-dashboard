@@ -16,6 +16,83 @@ spec.loader.exec_module(mod)
 
 
 class Tests(unittest.TestCase):
+    def withdrawn_fixture(self):
+        self.automatic_submit()
+        with self.p.connect() as con:
+            con.execute("UPDATE jobs SET status='blocked',note='Withdrawn before launch' WHERE id='test-1'")
+            self.p.event(con, 'test-1', 'blocked', 'Withdrawn before launch')
+        return self.p.get('test-1')
+
+    def test_outbox_retained_withdrawal_does_not_delay_ready_origin_or_retry(self):
+        original = self.withdrawn_fixture()
+        self.final_fixture([{'name': 'subject-check', 'result': 'passed'},
+                            {'name': 'later-check', 'result': 'passed'}], outcome='passed')
+        self.ready('final-fixture')
+        with patch.object(self.p, 'pending_retries', return_value=[{'attemptId': 'ready-retry'}]):
+            entries = self.p.pending()
+        self.assertEqual(entries[0]['orderId'], 'final-fixture')
+        self.assertEqual(entries[0]['threadId'], 'thread-1')
+        self.assertEqual(entries[1], {'attemptId': 'ready-retry'})
+        self.assertEqual(self.p.get('test-1'), original)
+        with self.assertRaisesRegex(ValueError, 'notification prohibited'):
+            self.p.delivered('test-1', 'Must not invent delivery')
+        self.assertEqual(self.p.get('test-1'), original)
+
+    def test_outbox_missing_packet_with_execution_or_report_traces_fails_closed(self):
+        self.withdrawn_fixture()
+        mutations = [
+            ("INSERT INTO attempts VALUES('test-1',1)", "DELETE FROM attempts"),
+            ("INSERT INTO platform_attempts VALUES('test-1','{}','hash')", "DELETE FROM platform_attempts"),
+            ("INSERT INTO session_members VALUES('test-1','session',0)", "DELETE FROM session_members"),
+            ("INSERT INTO notification_results VALUES('test-1','report','eligible','ready')", "DELETE FROM notification_results"),
+            ("UPDATE jobs SET status='recorded' WHERE id='test-1'", "UPDATE jobs SET status='blocked' WHERE id='test-1'"),
+        ]
+        for mutation, undo in mutations:
+            with self.subTest(mutation=mutation):
+                with self.p.connect() as con:
+                    con.execute(mutation)
+                with self.assertRaisesRegex(ValueError, 'Outbox order test-1:.*missing packet.*review'):
+                    self.p.pending()
+                with self.p.connect() as con:
+                    con.execute(undo)
+        self.p.evidence_dir('test-1').mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, 'Outbox order test-1:.*missing packet'):
+            self.p.pending()
+
+    def test_outbox_does_not_trust_withdrawal_prose_without_history(self):
+        self.withdrawn_fixture()
+        with self.p.connect() as con:
+            con.execute("DELETE FROM events WHERE id='test-1'")
+        with self.assertRaisesRegex(ValueError, 'Outbox order test-1:.*missing packet'):
+            self.p.pending()
+        with self.p.connect() as con:
+            self.p.event(con, 'test-1', 'queued')
+            self.p.event(con, 'test-1', 'running')
+            self.p.event(con, 'test-1', 'blocked', 'Withdrawn before launch')
+        with self.assertRaisesRegex(ValueError, 'Outbox order test-1:.*missing packet'):
+            self.p.pending()
+
+    def test_outbox_missing_or_invalid_packet_path_is_not_withdrawal(self):
+        original = self.withdrawn_fixture()
+        for path, content in [('missing.json', None), ('invalid.json', '{broken')]:
+            with self.subTest(path=path):
+                packet = self.root / path
+                if content:
+                    packet.write_text(content, encoding='utf-8')
+                with self.p.connect() as con:
+                    con.execute("UPDATE jobs SET packet=? WHERE id='test-1'", (str(packet),))
+                with self.assertRaisesRegex(ValueError, 'Outbox order test-1: packet verification failed'):
+                    self.p.pending()
+                self.assertIsNone(self.p.get('test-1')['delivery'])
+                self.assertEqual(self.p.get('test-1')['request'], original['request'])
+
+    def test_outbox_checks_tampered_packet_even_without_eligible_report(self):
+        packet = self.final_fixture([{'name': 'subject-check', 'result': 'passed'}])
+        entry = packet['files'][0]
+        Path(entry['path']).write_text('tampered', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'Outbox order final-fixture:.*manifest mismatch'):
+            self.p.pending()
+
     def test_packet_pins_manifest_declared_logs_but_not_backups(self):
         self.automatic_submit()
         run = self.root / 'runtime/runs/logs'

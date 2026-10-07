@@ -321,6 +321,14 @@ target/order; retain that receipt in the note. The same eligibility gate applies
 suppressed-result ledger message may wake an origin. Retain only eligible final
 report references for durable delivery.
 An offline app leaves the outbox pending; never invent a delivery receipt. Delivery
+discovery skips retained blocked/no-packet withdrawals only when the durable history
+is exactly initial queued/waiting-player then blocked with a matching nonempty note,
+and there is no attempt, platform plan, shared-session membership, order evidence
+directory or notification decision. This does not modify the historical row. A missing
+packet for any other terminal row, or invalid existing evidence even without an
+eligible report, stops `outbox` with its order id and a review/reconciliation diagnostic.
+Use the same `polygon.py --root <SESSION-ROOT> outbox` command; never delete historical
+rows or mark them delivered to unblock discovery. Delivery
 is at least once: if a crash occurs after send but before receipt marking, the
 same order id lets the receiver deduplicate. The outbox includes packetSha256;
 consumers record order id/hash before analysis or changes. A duplicate must not
