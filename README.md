@@ -50,7 +50,9 @@ The originating chat owns test design and mod conclusions. A ready order has:
    in the runner config's `extra_files`; optional staged SKSE plugins are pinned.
 3. Bounded actions and collection points, expected results, queried fields, units/tolerances and
    author-supplied mechanical assertions. Include baseline/comparison orders if
-   needed. Separate orders are separate launches; never silently rerun a failure.
+   needed. Compatible orders may share one game launch with separate check segments
+   and per-order results; see [shared-game-sessions.md](docs/shared-game-sessions.md).
+   Never silently rerun a failure.
 4. Explicit `testing.start` checkpoint and required checks/roles for new orders;
    see [test-results.md](docs/test-results.md). Fixture/game startup alone is not
    test start unless that is the declared subject of a control-chain test.
@@ -140,8 +142,10 @@ is idempotent; changed content requires a new id. Installed inputs are checked
 again before launch. Source pins and actual game-run executor hashes are retained.
 See the independent executor's docs/scenarios.md and docs/configuration.md.
 
-States: queued -> running -> recorded/blocked -> delivered. Only one order may
-own a game session. An interrupted running order is a barrier until native
+States: queued -> running -> recorded/blocked -> delivered. One session owner
+exclusively owns the game; the accepted shared-session policy permits several
+compatible orders under that owner. Current CLI execution still claims one order
+per run pending explicit session/member support (docs/shared-game-sessions.md). An interrupted running order is a barrier until native
 recovery and evidence reconciliation complete. Timeouts do not release ownership.
 The underlying runner separately excludes foreign/live manual sessions.
 
@@ -171,7 +175,9 @@ python <repository>/polygon.py --root <SESSION-ROOT> batch-release <batch-start.
 python <repository>/polygon.py --root <SESSION-ROOT> next
 ```
 
-The heartbeat may then process released orders one at a time. New standard orders
+The heartbeat processes authorized work under one exclusive game-session owner.
+Compatible ready orders may be grouped per docs/shared-game-sessions.md once
+shared-session dispatch is implemented; current CLI processes them one at a time. New standard orders
 wait for another owner start; each released order runs at most once. A repeated
 identical release is idempotent; altered id/content is refused. An expired release
 blocks its unstarted orders when processed; use new order ids and a new direct

@@ -114,6 +114,16 @@ the owner control launch authorization and the shared installation/game slot.
 A scenario-only correction retains the actual mod version/build and installed pins.
 Preparing the next order grants no additional launch or unbounded cycle.
 
+## Shared-session member reports
+
+Several compatible orders may be tested in one physical game session under
+[shared-game-sessions.md](shared-game-sessions.md). Keep separate starts, checks,
+coverage, outcomes and exact-origin reports. Finalization still requires the
+shared session to end and its environment to be restored; a finished check segment
+alone is insufficient. After that common gate, return each ready member report
+independently without waiting for unrelated orders or another member's unfinished
+report assessment. Current CLI multi-order session support is pending.
+
 ## Outcome and coverage
 
 Final report testResult.outcome is tested_successfully, tested_with_errors,

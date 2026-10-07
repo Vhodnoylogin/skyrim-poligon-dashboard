@@ -12,6 +12,15 @@ analysis, editing and building are allowed only in independent checkouts/output
 directories, outside live MO2/game/profile files. Installing a DLL while another
 test uses it would invalidate that test even if the game-session mutex is intact.
 
+## Shared launches
+
+Compatible ready orders from several origins may share a single game launch;
+read [shared-game-sessions.md](shared-game-sessions.md). The single game/reservation
+barrier excludes concurrent physical sessions, not several subjects within one.
+Each member keeps its own authority, cycle accounting, checks and report. Current
+single-order slots/dispatch below are legacy implementation, not permission to
+reuse another origin's slot; explicit shared reservation support is pending.
+
 ## Owner start and group limits
 
 The explicit owner start names the allowed mods, tasks and their originating
@@ -23,7 +32,8 @@ authorization metadata. A generic proposal for this workflow is not a start.
 
 Default limits for an explicit multi-mod start without specified bounds are
 three total iterations per named mod and one shared hour per named mod for the group, measured
-from its initial registration. For M mods this is at most 3*M game attempts, not
+from its initial registration. For M mods this is at most 3*M member test attempts
+(possibly fewer physical launches when compatible tests share sessions), not
 three more attempts every time a result is delivered. Three named mods therefore
 have a common three-hour deadline; the group stays bounded as work is serialized.
 If the owner sets a smaller

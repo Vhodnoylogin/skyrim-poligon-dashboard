@@ -12,6 +12,11 @@ Polygon owns tool selection, qualification and immutable per-attempt platform pi
 Tool updates never require a new queued mod order, fake a mod build or reset budgets.
 Preserve original schemaVersion1 orders unchanged, including their old pin checks.
 Maintain polygon.py, board.html, their tests and the agent contract in this repo.
+Read docs/shared-game-sessions.md: compatible independently authorized mod orders
+may share one game process with sequential checks and separate per-order reports.
+One exclusive session owner may serve multiple members; one mod per launch is not
+a policy requirement. Current CLI session/member support remains pending; preserve
+legacy checks rather than bypassing reservations.
 Preserve queue compatibility, the single game-session barrier, input pins, honest
 unavailable domains and receipt-based delivery. Never run automatic tests, restart
 the game/MO2/board server or take over a live session merely to develop the UI.
