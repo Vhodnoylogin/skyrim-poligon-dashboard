@@ -135,6 +135,35 @@ class ToolingRetryTests(unittest.TestCase):
         self.assertEqual(row['auxiliaryCoverage']['passed'], 1)
         self.assertEqual(self.original, {p: mod.digest(p) for p in self.original})
 
+    def test_retry_collection_fault_holds_and_preserves_predecessor(self):
+        order, ticket, plan = self.claimed()
+        run = self.native(ticket)
+        state = mod.read(run / 'state.json')
+        state.update(collectionComplete=False, collectionErrors=[
+            {'path': 'bridge.log', 'error': 'copy failed', 'segment': 'restart-1'}])
+        mod.write(run / 'state.json', state)
+        self.p.finish_retry(ticket['id'], run)
+        self.final(ticket)
+        row = self.p.retry_show(ticket['id'])
+        projection = mod.read(row['report'])['testResult']
+        self.assertEqual(projection['outcome'], 'interrupted_external')
+        self.assertEqual(projection['execution']['terminationCause'], 'evidence_collection_failure')
+        with self.p.connect() as con:
+            self.assertIsNotNone(con.execute('SELECT * FROM pipeline_holds WHERE id=?', (ticket['id'],)).fetchone())
+        self.assertEqual(self.original, {p: mod.digest(p) for p in self.original})
+
+    def test_retry_pretest_collection_fault_remains_unnotified(self):
+        order, ticket, plan = self.claimed()
+        run = self.native(ticket, checks=[])
+        result = mod.read(run / 'result.json')
+        result.update(collectionComplete=False, collectionErrors=[])
+        mod.write(run / 'result.json', result)
+        self.p.finish_retry(ticket['id'], run)
+        final = self.final(ticket)
+        self.assertEqual(final['eligibility'], 'suppressed')
+        self.assertFalse(self.p.pending())
+        self.assertEqual(self.original, {p: mod.digest(p) for p in self.original})
+
     def test_started_subject_or_unrestored_failure_is_not_tooling_retry(self):
         order, ticket, path = self.ticket(checks=[{'name': 'subject-response', 'result': 'failed'}])
         with self.assertRaisesRegex(ValueError, 'pre-subject'):

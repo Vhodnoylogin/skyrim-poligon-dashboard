@@ -104,6 +104,27 @@ class SharedSessionTests(unittest.TestCase):
         self.assertEqual(self.p.pending()[0]['threadId'], 'thread-1')
         self.assertEqual(self.p.reconcile(), [])
 
+    def test_shared_collection_fault_interrupts_started_members_only(self):
+        orders, plan = self.prepared()
+        checks = [{'name': name, 'result': 'passed'} for name in plan['members'][0]['checkNames']]
+        run = self.native_run(plan, checks=checks)
+        result = mod.read(run / 'result.json')
+        result.update(collectionComplete=False, collectionErrors=[
+            {'path': 'SteamVR/vrserver.txt', 'error': 'copy failed', 'segment': 'restart-1'}])
+        mod.write(run / 'result.json', result)
+        self.p.reconcile()
+        for order in orders:
+            self.finalize(order)
+            findings = mod.read(self.p.evidence_dir(order['id']) / 'self-checks.json')['findings']
+            self.assertEqual(findings[0]['kind'], 'evidence_collection_incomplete')
+        pending = self.p.pending()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['threadId'], 'thread-0')
+        self.assertEqual(pending[0]['testOutcome'], 'interrupted_external')
+        second = next(b for b in self.p.board() if b['id'] == orders[1]['id'])
+        self.assertEqual(second['testOutcome'], 'not_started')
+        self.assertEqual(second['notificationEligibility'], 'suppressed')
+
     def test_shared_bootstrap_is_auxiliary_for_each_member_and_unknown_checks_survive(self):
         orders, plan = self.prepared()
         run = self.native_run(plan)

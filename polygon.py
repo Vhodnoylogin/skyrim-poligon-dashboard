@@ -755,11 +755,34 @@ class Polygon(SharedSessions, ToolingRetries):
             names.add(name)
 
     @staticmethod
-    def execution_summary(order, run, outcome, reason):
+    def collection_findings(run, pinned_paths=None):
+        """Explicit additive collector faults; absent/null legacy fields say nothing."""
+        findings = []
+        if not run:
+            return findings
+        for name in ("state.json", "result.json"):
+            path = Path(run) / name
+            if not path.is_file() or (pinned_paths is not None and path.resolve() not in pinned_paths):
+                continue
+            value = read(path)
+            complete, errors = value.get("collectionComplete"), value.get("collectionErrors")
+            malformed = ((complete is not None and type(complete) is not bool)
+                         or (errors is not None and not isinstance(errors, list)))
+            if complete is False or errors or malformed:
+                findings.append({"component": "skyrim-autotest", "kind": "evidence_collection_incomplete",
+                                 "path": str(path), "confirmed": True,
+                                 "details": {"collectionComplete": complete, "collectionErrors": errors}})
+        return findings
+
+    @staticmethod
+    def execution_summary(order, run, outcome, reason, pinned_paths=None):
         """Technical evidence projection; never a test-order result or mod diagnosis."""
         state = read(Path(run) / "state.json") if run and (Path(run) / "state.json").exists() else {}
+        collection = Polygon.collection_findings(run, pinned_paths)
         if not run:
             cause = "pre_session_refusal"
+        elif collection:
+            cause = "evidence_collection_failure"
         elif reason.startswith("Assertion failed:"):
             cause = "assertion_stop"
         elif "exited unexpectedly" in reason:
@@ -774,6 +797,7 @@ class Polygon(SharedSessions, ToolingRetries):
                 "phase": state.get("phase"), "done": state.get("done"),
                 "terminationCause": cause, "rawOutcome": outcome, "reason": reason,
                 "restored": state.get("restored"), "restoreErrors": state.get("restoreErrors"),
+                "collectionFindings": collection,
                 "evidence": str(Path(run) / "steps.jsonl") if run else None}
 
     @staticmethod
@@ -866,8 +890,8 @@ class Polygon(SharedSessions, ToolingRetries):
         coverage.extend({"name": c.get("name"), "role": "unknown", "status": c.get("result", "unavailable")}
                         for c in actual if c.get("name") not in names)
         counts = {s: sum(c["status"] == s for c in coverage) for s in ("passed", "failed", "not_run", "unavailable")}
-        cause = self.execution_summary(order, run, packet["executionOutcome"], packet["reason"])
-        external = cause["terminationCause"] in ("pre_session_refusal", "unexpected_process_exit", "operational_interruption")
+        cause = self.execution_summary(order, run, packet["executionOutcome"], packet["reason"], pinned_paths)
+        external = cause["terminationCause"] in ("pre_session_refusal", "unexpected_process_exit", "operational_interruption", "evidence_collection_failure")
         failed_subject = any(c["role"] == "subject" and c["status"] == "failed" for c in coverage)
         failed_tool = (any(c["role"] in ("fixture", "tooling") and c["status"] == "failed" for c in coverage)
                        or any(c["result"] == "failed" for c in auxiliary))
@@ -1174,6 +1198,7 @@ class Polygon(SharedSessions, ToolingRetries):
                     findings.append({"component": "skyrim-autotest", "kind": "changed_build", "path": pin["path"], "confirmed": True})
         if run:
             result = read(Path(run) / "result.json")
+            findings.extend(self.collection_findings(run))
             if result.get("restored") is not True or result.get("restoreErrors"):
                 findings.append({"component": "skyrim-autotest", "kind": "restoration_unverified", "details": result.get("restoreErrors"), "confirmed": True})
         order = json.loads(self.get(job)["request"])

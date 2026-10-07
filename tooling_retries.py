@@ -249,7 +249,9 @@ class ToolingRetries:
             raise ValueError('Retry native completion/scenario/restoration not proven')
         outcome = state.get('result', 'failed') if run else 'blocked'
         note = state.get('reason', '') if run else reason or 'Retry preparation refused'
-        findings = []
+        findings = self.collection_findings(run)
+        if findings:
+            self.hold_pipeline(attempt_id, 'Retry evidence collection incomplete; tooling review required')
         if run:
             try:
                 self.verify_platform(order, attempt_id=attempt_id)

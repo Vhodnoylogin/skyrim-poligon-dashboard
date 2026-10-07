@@ -156,6 +156,34 @@ This collection fix changes neither assertion outcomes nor measurement quality.
 An observed action remains an observation. Sampled holding does not establish
 uninterrupted holding during unobserved intervals.
 
+## Explicit executor collection status
+
+Future native `state.json` and `result.json` may add `collectionComplete` (boolean)
+and `collectionErrors` (array of `{path, error, segment}` details). A false completion
+flag or nonempty errors in either source is an executor evidence collection fault,
+even if the other source claims completion or raw checks/result claim success.
+Absent/null fields retain legacy behavior; malformed nonnull types fail conservatively.
+The consumer does not infer this contract from error text or a `collect-error` log
+event alone. The producer records those events and reports raw failure with reason
+`evidence collection incomplete`; Polygon preserves the raw outcome verbatim.
+
+`self-checks.json` records `evidence_collection_incomplete` findings with exact
+source and error details, and finalization holds shared dispatch for tooling review,
+including retry attempts. Execution projects `terminationCause=evidence_collection_failure`
+and `collectionFindings`; test projection accepts only hash-pinned native sources.
+After factual subject start this is `interrupted_external`, never inferred subject
+failure/success. An independently observed subject mismatch remains
+`tested_with_errors` with `interruptionObserved=true`; neither finding erases the other.
+Before subject start the outcome remains `not_started` and origin notification is
+suppressed. Shared members retain independent start gates and exact-origin delivery.
+
+Collection failure does not imply restoration failure. Native restoration must still
+finish independently; done/restored/restoreErrors, report-ready and packet identity
+gates remain mandatory. `collectionFinished=true` in a final-report request means
+the collection phase and assessment have ended, not that every capture succeeded;
+missing requested data remain unavailable/not_collected. No old order, packet or
+final report is rewritten, no hold is cleared and no new launch is authorized.
+
 ## Executor-generated auxiliary technical checks
 
 New executor bootstrap checks may carry typed provenance instead of entering the
