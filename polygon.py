@@ -28,6 +28,7 @@ sys.path.insert(0, str(HERE))
 import subject_contract
 from shared_sessions import SharedSessions
 from tooling_retries import ToolingRetries
+from autotest_workflow import AutotestWorkflow
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 SHA = re.compile(r"[0-9a-f]{64}")
 READ_KINDS = {"state", "player", "refs", "scene", "vm", "world_observer"}
@@ -117,7 +118,7 @@ def owner_evidence(approval, path, require_deadline=True):
     return evidence
 
 
-class Polygon(SharedSessions, ToolingRetries):
+class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow):
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.local = self.root / "local/skyrim-polygon"
@@ -160,6 +161,7 @@ class Polygon(SharedSessions, ToolingRetries):
 
         self.init_sessions()
         self.init_retries()
+        self.init_autotest_workflow()
 
     @contextlib.contextmanager
     def connect(self):
@@ -199,7 +201,7 @@ class Polygon(SharedSessions, ToolingRetries):
         return {"id": approval["id"], "status": "active"}
 
     def release_batch(self, path):
-        """Snapshot a ready batch only after the owner's manual start command."""
+        """Snapshot orders after an owner batch start or explicit mod autotest request."""
         path = Path(path).resolve()
         approval = read(path)
         if approval.get("schemaVersion") != 1 or not SAFE_ID.fullmatch(approval.get("id", "")):
@@ -208,6 +210,10 @@ class Polygon(SharedSessions, ToolingRetries):
         ids = approval.get("orderIds")
         if not isinstance(ids, list) or not ids or any(not isinstance(i, str) for i in ids) or len(set(ids)) != len(ids):
             raise ValueError("List exact unique ready orderIds")
+        if "workflow" in approval:
+            if approval["workflow"] != "autotest":
+                raise ValueError("Explicit batch workflow must be autotest")
+            required_string(approval, "toolThreadId")
         canonical = json.dumps(approval, sort_keys=True, ensure_ascii=False)
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -220,6 +226,8 @@ class Polygon(SharedSessions, ToolingRetries):
                 row = con.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()
                 if not row or row["status"] != "queued" or json.loads(row["request"]).get("cycle") is not None:
                     raise ValueError("Batch accepts ready standard automatic orders only")
+                if approval.get("workflow") == "autotest" and approval["toolThreadId"] == json.loads(row["request"])["sourceThreadId"]:
+                    raise ValueError("Tooling recipient must be distinct from the mod origin")
                 if con.execute("SELECT id FROM released_orders WHERE id=?", (job,)).fetchone():
                     raise ValueError("Order already belongs to a released batch")
             con.execute("INSERT INTO releases VALUES(?,?)", (approval["id"], canonical))
@@ -1625,6 +1633,8 @@ class Polygon(SharedSessions, ToolingRetries):
                 except (ValueError, OSError, TypeError, KeyError) as error:
                     raise ValueError(f"Outbox order {row['id']}: packet verification failed ({error}); "
                                      "review retained evidence/reconcile; no delivery permitted") from error
+                if self.autotest_approval(con, row["id"]):
+                    continue
                 if not decision or decision["eligibility"] != "eligible":
                     continue
                 # Pending same-origin work suppresses discovery until its completion.
@@ -1640,9 +1650,11 @@ class Polygon(SharedSessions, ToolingRetries):
                             "report": registered["path"], "reportSha256": registered["sha256"],
                             "testOutcome": entry["testResult"]["outcome"],
                             "text": f"Skyrim-Polygon order {row['id']}: {entry['testResult']['outcome']}. Completed testing report: {registered['path']}. Read and analyze once. Repairs require the owner's task scope; further testing requires a separate launch authorization or an active bounded full cycle."})
-        return out + self.pending_retries()
+        return out + self.pending_retries() + self.pending_autotests()
 
     def delivered(self, job, receipt):
+        if job.startswith("autotest:"):
+            return self.autotest_delivered(job, receipt)
         with self.connect() as con:
             retry = con.execute("SELECT id FROM retry_attempts WHERE id=?", (job,)).fetchone()
         if retry:
@@ -1656,6 +1668,8 @@ class Polygon(SharedSessions, ToolingRetries):
                 raise ValueError("No result to deliver")
             if row["status"] == "delivered":
                 return {"id": job, "duplicate": True}
+            if self.autotest_approval(con, job):
+                raise ValueError("Use the autotest notificationId and structured exact-target receipt")
             self.delivery_report(con, row)
             con.execute("UPDATE jobs SET status='delivered',delivery=? WHERE id=?", (receipt, job))
             self.event(con, job, "delivered", receipt)
@@ -1676,7 +1690,7 @@ class Polygon(SharedSessions, ToolingRetries):
                 item["subjectSpecificationSha256"] = subject_contract.subject_identity(request) if request["schemaVersion"] == 2 else None
                 plan = con.execute("SELECT sha256 FROM platform_attempts WHERE id=?", (row["id"],)).fetchone()
                 item["platformPlanSha256"] = plan[0] if plan else None
-                item["workflow"] = "full-cycle" if cycle is not None else "standard"
+                item["workflow"] = "full-cycle" if cycle is not None else "autotest" if self.autotest_approval(con, row["id"]) else "standard"
                 item["cycleId"] = cycle["id"] if isinstance(cycle, dict) else None
                 item["awaitingOwnerStart"] = row["mode"] == "automatic" and row["status"] == "queued" and cycle is None and not con.execute("SELECT id FROM released_orders WHERE id=?", (row["id"],)).fetchone()
                 decision = con.execute("SELECT * FROM notification_results WHERE id=?", (row["id"],)).fetchone()
@@ -1734,7 +1748,7 @@ def main(argv=None):
         sub.add_parser(command).add_argument("id")
     register = sub.add_parser("cycle-register", help="Only after verifying a direct owner start; never inferred from an order")
     register.add_argument("authorization", type=Path)
-    batch = sub.add_parser("batch-release", help="Only after the owner asks Polygon to start prepared standard orders")
+    batch = sub.add_parser("batch-release", help="Verified owner batch start or explicit one-shot mod autotest request")
     batch.add_argument("authorization", type=Path)
     ticket = sub.add_parser("slot-request")
     ticket.add_argument("request", type=Path)

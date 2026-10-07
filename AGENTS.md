@@ -1,6 +1,16 @@
 # Skyrim-Poligon-Dashboard development
 
 Read README.md before editing. This is a chat service and dashboard, not a game mod.
+For an owner's request to conduct an autotest, read docs/autotest-workflow.md.
+Prepare the ordinary mode-independent subject order, record its verified one-shot
+release with workflow=autotest and exact toolThreadId, hand off once to Polygon
+and await final analysis. No second owner batch-start request is required.
+After factual start/end, restoration, collection and final-report verification,
+outbox routes technical faults to the tool chat with a testing command and failed
+report to the origin; subject mismatches to the origin for analysis; complete
+success to the origin for analysis and explicit owner confirmation. Never-started
+tests notify neither chat. Use per-recipient notificationId and structured
+exact-target receipts. No implicit full mod repair loop or unbounded retries.
 For tooling-only pre-subject continuation read docs/tooling-retries.md. retry-register
 creates a separate attempt with unchanged subject/old evidence, reviewed restoration,
 qualified current platform and independently verified owner permission. Never requeue

@@ -6,7 +6,7 @@ This standalone chat tool routes mod test orders to one dedicated Codex chat. It
 a game mod. It wraps the independent Skyrim Autotest executor and has its own
 durable multi-chat queue, read-only board and evidence return outbox.
 
-There are two workflows, separate from automatic/assisted execution modes:
+There are three workflows, separate from automatic/assisted execution modes:
 
 - **Standard/manual**: the owner asks mod chats to prepare complete file-backed
   orders. They submit to the durable board without messaging Polygon. When all
@@ -18,6 +18,11 @@ There are two workflows, separate from automatic/assisted execution modes:
   the independently registered authorization; all testing details stay in order
   files. See [the full-cycle contract](docs/full-cycle.md). This task/documentation
   does not start a cycle, and a result notification cannot start one.
+- **Autotest**: an owner's request to a mod chat covers preparation, one automatic
+  attempt, waiting for its final report and origin analysis. See
+  [autotest-workflow.md](docs/autotest-workflow.md) for separate authorization,
+  final-only tool/origin routing and independent exact-target receipts. Tests
+  that never factually start notify neither chat. No automatic mod repair loop.
 
 Several mod chats can develop under independent active full cycles at once.
 Their analysis and staged builds may run in parallel; installation and game runs

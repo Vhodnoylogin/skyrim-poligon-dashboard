@@ -6,6 +6,10 @@ process or loaded fixture is not proof that the order's testing began. `recorded
 means a raw packet exists; `delivered` means a verified notification receipt.
 Neither means tested successfully. No final testing label appears before the
 attempt has ended and collection/report checks have completed.
+An explicit one-shot autotest release adds independent final report actions for
+the mod origin and technical recipient; see [autotest-workflow.md](autotest-workflow.md).
+Before factual subject start both recipients remain suppressed. Ordinary and
+full-cycle releases preserve their existing behavior.
 
 ## Declare the factual testing boundary in new orders
 
