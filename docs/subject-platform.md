@@ -67,6 +67,11 @@ not merely a responsive endpoint. Additional field names must describe a stable
 domain quantity (including units/identity) in the qualification reason/evidence.
 Changing meaning or units requires an explicit interface/scenario migration.
 
+One subject plan permits 1..512 steps. This capacity is independent of the shared
+session's combined 256-step bound: a larger single order cannot join such a group.
+Increasing capacity grants no launch, extends no owner/cycle deadline or executor
+timing budget, and supplies no missing platform observations. Original submitted
+orders and their hashes remain immutable; qualification and authority gates apply.
 Steps need unique names, finite timeouts up to180seconds and assertions, or explicit
 non-polling `observe:true`. At least one assertion is required. Only read operations
 may poll. Assertions use `field` and exactly one of equals/contains/min/max/exists.

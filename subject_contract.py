@@ -10,6 +10,7 @@ import math
 import re
 
 INTERFACE = "polygon-actions/1"
+MAX_SUBJECT_STEPS = 512
 OPERATIONS = {
     "state.read": set(), "player.read": set(), "world.read": {"request"},
     "input.perform": {"request"}, "controller.perform": {"request"},
@@ -53,8 +54,8 @@ def validate(plan):
     if "startMode" in fixture and (fixture["startMode"] != "new-game" or "save" in fixture or not fixture.get("cell")):
         raise ValueError("New-game fixture requires cell and no save")
     steps = plan["steps"]
-    if not isinstance(steps, list) or not 1 <= len(steps) <= 256:
-        raise ValueError("Subject plan needs 1..256 bounded steps")
+    if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_SUBJECT_STEPS:
+        raise ValueError(f"Subject plan needs 1..{MAX_SUBJECT_STEPS} bounded steps")
     names, assertions = set(), 0
     for step in steps:
         if not isinstance(step, dict) or set(step) - {"name", "operation", "parameters", "timeout", "poll", "assert", "observe"}:
