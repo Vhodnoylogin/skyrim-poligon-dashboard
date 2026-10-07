@@ -43,6 +43,18 @@ A new order requires its own existing owner launch/cycle authorization.
 
 ## Complete, restore, collect, finalize, then send
 
+Finalize and return each independent order as soon as its own factual testing
+has ended, restoration and collection are complete, and its final report passes
+verification. Do not wait for unrelated mods/orders in the same batch, group or
+queue, including queued, running or blocked ones. After each completion, process
+its eligible outbox entry promptly, before continuing unrelated batch work when
+the entry is available. Send order id, mechanical testing outcome and report path
+to that order's exact sourceThreadId; no batch-wide recipient list is required.
+Mark delivered only after a successful app receipt for that exact target/order.
+If delivery is unavailable, retain the pending entry and proceed only with
+otherwise authorized work. This does not bypass factual-start, evidence, recovery
+or same-origin successor/repeat gates; those are not unrelated batch barriers.
+
 `finish` retains the raw schemaVersion1 packet and legacy executionOutcome.
 New completions also log execution-summary.json, separating assertion_stop,
 unexpected_process_exit, operational_interruption, normal_close and unknown.

@@ -150,6 +150,11 @@ Never omit cycle metadata or invent a new cycle id to evade a stop/limit.
 
 ## Receipt and exactly one continuation decision
 
+Return each independent cycle's eligible completed report as soon as it is ready;
+other mods in the group/batch need not finish first. Their queued, running or
+blocked work cannot delay this origin's report or require a shared recipient list.
+See test-results.md for per-order return and the retained eligibility gates.
+
 Polygon sends id, testing outcome and final-report path to exact sourceThreadId
 only after declared factual test start, ended attempt, restoration, finished
 collection and report-ready validation (test-results.md). A raw packet or launch

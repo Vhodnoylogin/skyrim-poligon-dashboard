@@ -259,6 +259,12 @@ or microphone. See knowledge/voice-channel.md for the existing channel.
 
 ## Self-checks and evidence return
 
+Each independent order returns its verified completed report immediately; do not
+wait for the batch of unrelated mods to finish. Queued, running or blocked orders
+for other origins do not delay this return. Process each ready outbox entry for
+its exact sourceThreadId and mark delivered only after its successful app receipt.
+See [test-results.md](docs/test-results.md) for all eligibility and evidence gates.
+
 Check runner and World Observer throughout the run: start readiness, pinned
 builds, actual capabilities, sampling identities/generation/phase, schema/units,
 unavailable fields, busy/drop/gap counters and final restoration. Save observations

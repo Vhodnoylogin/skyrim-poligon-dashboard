@@ -1,6 +1,11 @@
 # Skyrim-Poligon-Dashboard development
 
 Read README.md before editing. This is a chat service and dashboard, not a game mod.
+Return each independent order's verified completed report promptly to its exact
+sourceThreadId, without waiting for unrelated mods in its batch/group/queue.
+After each completion process eligible outbox entries; delivered requires the
+exact successful app receipt. Preserve factual-start/end, restoration, collection
+and final-report checks; same-origin successor gates do not imply a batch barrier.
 New automatic mod orders use schemaVersion2 and docs/subject-platform.md. Origins
 pin subject/game dependencies/fixture only and declare semantic actions/checks.
 Polygon owns tool selection, qualification and immutable per-attempt platform pins.
