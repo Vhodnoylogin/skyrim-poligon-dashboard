@@ -145,7 +145,8 @@ See the independent executor's docs/scenarios.md and docs/configuration.md.
 States: queued -> running -> recorded/blocked -> delivered. One session owner
 exclusively owns the game; the accepted shared-session policy permits several
 compatible orders under that owner. Current CLI execution still claims one order
-per run pending explicit session/member support (docs/shared-game-sessions.md). An interrupted running order is a barrier until native
+per ungrouped run; session-register binds compatible released standard orders
+to one shared run (docs/shared-game-sessions.md). An interrupted running order is a barrier until native
 recovery and evidence reconciliation complete. Timeouts do not release ownership.
 The underlying runner separately excludes foreign/live manual sessions.
 
@@ -176,8 +177,9 @@ python <repository>/polygon.py --root <SESSION-ROOT> next
 ```
 
 The heartbeat processes authorized work under one exclusive game-session owner.
-Compatible ready orders may be grouped per docs/shared-game-sessions.md once
-shared-session dispatch is implemented; current CLI processes them one at a time. New standard orders
+Compatible ready standard orders may be grouped through session-register per
+docs/shared-game-sessions.md; next executes one native session for those members.
+Ungrouped and incompatible orders retain separate runs. New standard orders
 wait for another owner start; each released order runs at most once. A repeated
 identical release is idempotent; altered id/content is refused. An expired release
 blocks its unstarted orders when processed; use new order ids and a new direct

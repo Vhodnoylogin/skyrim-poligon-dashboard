@@ -19,7 +19,8 @@ read [shared-game-sessions.md](shared-game-sessions.md). The single game/reserva
 barrier excludes concurrent physical sessions, not several subjects within one.
 Each member keeps its own authority, cycle accounting, checks and report. Current
 single-order slots/dispatch below are legacy implementation, not permission to
-reuse another origin's slot; explicit shared reservation support is pending.
+reuse another origin's slot. Standard generic orders support shared dispatch;
+full-cycle multi-origin slot preparation remains an explicit unsupported boundary.
 
 ## Owner start and group limits
 

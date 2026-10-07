@@ -2,10 +2,11 @@
 
 Tags: testing, tools
 
-Owner instruction: 2026-10-07. Accepted scheduling policy; shared-session dispatch,
-reservation and evidence support are not implemented in the current CLI. This
-policy replaces the blanket rule that separate orders require separate launches.
-It does not start testing or authorize bypassing current queue/recovery checks.
+Owner instruction: 2026-10-07. Shared automatic standard-session dispatch is
+implemented for compatible generic schema1/schema2 scenarios. This replaces the
+blanket rule that separate orders require separate launches. Current legacy
+profile identity checks remain; mode-independent/composition-based requests are
+a separate pending migration. This document does not authorize a launch.
 
 ## Select compatible ready orders
 
@@ -78,18 +79,74 @@ and common restoration are already verified. delivered still requires a successf
 app receipt for that exact target/order. No origin notification before factual
 test start/end and verified report readiness.
 
-## Implementation boundary
+## Commands and supported scope
 
-The current jobs mutex, claim/execute_next path, cycle slots, per-order platform
-plans and recovery/packet contracts execute one order per native run. Do not fake
-a shared session by concurrent claims, changing retained order identities, assigning
-one origin to several mods, or invoking next against an already running game.
-Implement explicit session/member records, shared reservation ownership, qualified
-scenario composition, per-member evidence projection and recovery before automatic
-multi-order dispatch. Preserve legacy single-order execution until then.
+The operator verifies compatibility and creates this external session request;
+origins keep their existing immutable orders:
 
-Offline validation must cover compatible grouping, conflicting composition/save
-requirements, exact-origin routing, independently authorized member budgets,
-FIFO fairness, state contamination, partial coverage after a crash, idempotent
-recovery, immutable member pins and independent delivery after shared restoration.
-No live run or service restart follows from this documentation change.
+```json
+{
+  "schemaVersion": 1,
+  "id": "compatible-mods-session-1",
+  "orderIds": ["mod-a-order-1", "mod-b-order-1"],
+  "compatibility": {
+    "verifiedBy": "ACCOUNTABLE-OPERATOR",
+    "reason": "Same fixture and composition; these segments have independent state",
+    "stateIndependent": true
+  }
+}
+```
+
+```text
+python <repository>/polygon.py --root <ROOT> session-register <session-request.json>
+python <repository>/polygon.py --root <ROOT> session-show compatible-mods-session-1
+python <repository>/polygon.py --root <ROOT> next
+python <repository>/polygon.py --root <ROOT> reconcile
+python <repository>/polygon.py --root <ROOT> recover-active
+```
+
+Registration is idempotent and does not release orders. Each member still needs
+its independently verified owner batch release. List 2..32 orders in FIFO order;
+all must form the contiguous oldest released ready work at dispatch. Otherwise
+the group waits without skipping unrelated older work. An unstarted group may be
+dissolved using session-cancel <session-id>; this preserves its request/history,
+leaves member orders unchanged and permits normal scheduling/regrouping.
+
+Preparation verifies input pins, each member's authority, exact source-profile
+selection requirements, identical resolved runner configuration/platform pins,
+and identical initial cell/save/new-game state. Only generic steps scenarios
+with explicit check-based factual starts are supported. Total checks are bounded
+at256. There is no mid-session fixture reset: requests needing different fixtures,
+process startup semantics or contamination-sensitive isolation use separate runs.
+The accountable stateIndependent review describes semantic compatibility; hashes
+cannot establish absence of cross-mod state effects. Specialized mobility/hand
+probes and mixed platform configurations are rejected before native execution.
+
+Cycle orders currently retain single-origin exclusive preparation slots and are
+rejected from grouping. Sharing a launch does not justify reusing another origin's
+slot. A shared multi-origin installation protocol is a separate required extension
+before full-cycle members can share sessions. Assisted execution remains separate.
+
+One running anchor job and durable session/member records own the shared native
+launch; companions use session_waiting. All launch/install/clearance paths retain
+the session barrier through restoration and packet collection, including partial
+finalization after a crash. Each dispatched member receives an attempts entry;
+replaying the child refuses instead of launching again. The session id and member
+bindings are exposed on the board. No subject order or old packet is rewritten.
+
+The frozen session plan binds original request hashes, exact origins, per-member
+qualified platform plans, namespaced check mapping, combined scenario/configuration
+and tool pins. Dispatch rechecks it and each owner release/input/source profile.
+The native runner is called once. Its immutable shared state/result/log evidence
+is pinned in separate member packets; final reports project only that member's
+checks back to original names. Later unstarted checks have no factual start and
+cannot notify an origin. Earlier fully passing members retain their results when
+a later segment fails; unsupported or missing coverage stays explicit.
+
+Finish/reconcile requires native completion, exact combined scenario hash and
+successful restoration. Ordinary finish cannot bypass a shared member's barrier.
+An interrupted preparation before a frozen dispatch plan can be closed by
+recover-active without launching; a possibly started run uses native recovery.
+After common restoration, use ordinary report-ready/outbox/delivered independently
+for each member. No automatic replay, game launch or service restart is authorized
+by installing this source change.

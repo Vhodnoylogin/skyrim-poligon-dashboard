@@ -15,7 +15,9 @@ Maintain polygon.py, board.html, their tests and the agent contract in this repo
 Read docs/shared-game-sessions.md: compatible independently authorized mod orders
 may share one game process with sequential checks and separate per-order reports.
 One exclusive session owner may serve multiple members; one mod per launch is not
-a policy requirement. Current CLI session/member support remains pending; preserve
+a policy requirement. session-register groups compatible released standard generic
+orders; next runs the group once, with separate member packets. Read supported
+fixture/platform restrictions and retained single-origin cycle-slot limits; preserve
 legacy checks rather than bypassing reservations.
 Preserve queue compatibility, the single game-session barrier, input pins, honest
 unavailable domains and receipt-based delivery. Never run automatic tests, restart

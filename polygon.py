@@ -26,6 +26,7 @@ HERE = Path(__file__).resolve().parent
 # The journal compatibility entrypoint uses runpy rather than a package import.
 sys.path.insert(0, str(HERE))
 import subject_contract
+from shared_sessions import SharedSessions
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 SHA = re.compile(r"[0-9a-f]{64}")
 READ_KINDS = {"state", "player", "refs", "scene", "vm", "world_observer"}
@@ -115,7 +116,7 @@ def owner_evidence(approval, path, require_deadline=True):
     return evidence
 
 
-class Polygon:
+class Polygon(SharedSessions):
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.local = self.root / "local/skyrim-polygon"
@@ -155,6 +156,8 @@ class Polygon:
             CREATE UNIQUE INDEX IF NOT EXISTS one_active_game ON jobs((1))
               WHERE status='running';
             """)
+
+        self.init_sessions()
 
     @contextlib.contextmanager
     def connect(self):
@@ -306,7 +309,7 @@ class Polygon:
                     result["status"] = "blocked"
                     return result
                 return self.slot_view(existing)
-            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone():
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone():
                 return {"status": "game_busy"}
             # A manually released finite batch finishes before changing its installation.
             if con.execute("SELECT jobs.id FROM jobs JOIN released_orders ON jobs.id=released_orders.id WHERE jobs.status='queued'").fetchone():
@@ -348,7 +351,7 @@ class Polygon:
             raise ValueError("Exact hold and reviewed shared environment required")
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone():
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone():
                 raise ValueError("Recover active session before pipeline clearance")
             con.execute("DELETE FROM pipeline_holds WHERE id=?", (issue,))
             self.event(con, issue, "pipeline_cleared", json.dumps(evidence, sort_keys=True))
@@ -396,7 +399,7 @@ class Polygon:
             row = con.execute("SELECT * FROM cycle_slots WHERE id=?", (slot,)).fetchone()
             if not row:
                 raise ValueError("Unknown slot")
-            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone():
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone():
                 raise ValueError("Recover active game before clearing installation slot")
             order = con.execute("SELECT status FROM jobs WHERE id=?", (row["order_id"],)).fetchone()
             if order and order["status"] == "queued":
@@ -693,7 +696,7 @@ class Polygon:
             con.execute("BEGIN IMMEDIATE")
             if con.execute("SELECT id FROM pipeline_holds").fetchone():
                 return None
-            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone():
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone():
                 return None
             if job:
                 if con.execute("SELECT id FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone():
@@ -710,6 +713,8 @@ class Polygon:
                         row = candidate
                         break
             if not row:
+                return None
+            if con.execute("SELECT order_id FROM session_members WHERE order_id=?", (row["id"],)).fetchone():
                 return None
             con.execute("UPDATE jobs SET status='running',note='' WHERE id=?", (row["id"],))
             self.event(con, row["id"], "running")
@@ -775,6 +780,10 @@ class Polygon:
         result_path = Path(run) / "result.json" if run else None
         result = read(result_path) if result_path and result_path.resolve() in pinned_paths else {}
         actual = result.get("checks") or []
+        shared = packet.get("sharedSession")
+        if shared:
+            names = shared["checkNames"]
+            actual = [{**c, "name": names[c["name"]]} for c in actual if c.get("name") in names]
         testing = order.get("testing")
         started = False
         if testing:
@@ -831,6 +840,19 @@ class Polygon:
         for entry in packet["files"]:
             if digest(entry["path"]) != entry["sha256"] or Path(entry["path"]).stat().st_size != entry["bytes"]:
                 raise ValueError("Packet evidence manifest mismatch")
+        shared = packet.get("sharedSession")
+        if shared:
+            reference = Path(row["packet"]).parent / "shared-session.json"
+            if not any(Path(e["path"]).resolve() == reference.resolve() for e in packet["files"]) or read(reference) != shared:
+                raise ValueError("Shared session reference is not in verified packet evidence")
+        if shared and shared.get("path"):
+            if digest(shared["path"]) != shared["sha256"]:
+                raise ValueError("Shared session manifest changed")
+            plan = read(shared["path"])
+            member = next((x for x in plan["members"] if x["orderId"] == row["id"]), None)
+            if (not member or member["orderSha256"] != subject_contract.identity(order)
+                    or member["checkNames"] != shared["checkNames"] or plan["anchorOrderId"] != shared["anchorOrderId"]):
+                raise ValueError("Shared session member provenance mismatch")
         return order, packet
 
     def report_ready(self, path):
@@ -869,7 +891,13 @@ class Polygon:
                 run = packet.get("runDirectory")
                 if run:
                     state = read(Path(run) / "state.json")
-                    if state.get("done") is not True or state.get("order", {}).get("id") != job:
+                    shared = packet.get("sharedSession")
+                    expected_owner = shared["anchorOrderId"] if shared else job
+                    if shared:
+                        session = self.member_session(job)
+                        if not session or session["status"] != "complete":
+                            raise ValueError("Shared session must finish restoring and collecting first")
+                    if state.get("done") is not True or state.get("order", {}).get("id") != expected_owner:
                         raise ValueError("Execution completion/identity not proven")
                     if not any(Path(e["path"]).resolve() == (Path(run) / "state.json").resolve() for e in packet["files"]):
                         raise ValueError("Execution completion is not in pinned packet evidence")
@@ -1026,7 +1054,7 @@ class Polygon:
         canonical = json.dumps(plan, ensure_ascii=False, sort_keys=True)
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            if con.execute("SELECT status FROM jobs WHERE id=?", (order["id"],)).fetchone()[0] != "running":
+            if con.execute("SELECT status FROM jobs WHERE id=?", (order["id"],)).fetchone()[0] not in ("running", "session_waiting"):
                 raise ValueError("Platform preparation needs the claimed attempt")
             con.execute("INSERT OR IGNORE INTO platform_attempts VALUES(?,?,?)", (order["id"], canonical, subject_contract.identity(plan)))
         plan = self.verify_platform(order, require_file=False)
@@ -1158,7 +1186,10 @@ class Polygon:
                 self.stop_cycle(cycle["id"], "blocked", "Tooling finding in " + job)
         return {"id": job, "recorded": str(target)}
 
-    def finish(self, job, outcome, note, run=None, restored=None):
+    def finish(self, job, outcome, note, run=None, restored=None, _shared=False):
+        session = self.member_session(job)
+        if session and not _shared:
+            raise ValueError("Shared members finish through session reconciliation")
         row = self.get(job)
         if row["packet"]:
             packet = read(row["packet"])
@@ -1185,6 +1216,15 @@ class Polygon:
                   "reason": note, "runDirectory": str(run) if run else None,
                   "restored": restored, "files": files, "requestedData": order["collect"],
                   "analysis": None, "finishedAt": time.time()}
+        shared_path = folder / "shared-session.json"
+        if shared_path.exists():
+            packet["sharedSession"] = read(shared_path)
+            if packet["sharedSession"].get("path"):
+                directory = Path(packet["sharedSession"]["path"]).parent
+                for name in ("session-plan.json", "config.json", "scenario.json", "executor.log"):
+                    path = directory / name
+                    if path.is_file():
+                        files.append({"path": str(path), "sha256": digest(path), "bytes": path.stat().st_size})
         packet["sourceProfile"] = order["profile"]
         if order.get("schemaVersion") == 2:
             packet["subjectOrderSha256"] = subject_contract.identity(order)
@@ -1215,8 +1255,10 @@ class Polygon:
         """An interrupted order is never automatically requeued or rerun."""
         with self.connect() as con:
             rows = con.execute("SELECT * FROM jobs WHERE status='running' AND mode='automatic'").fetchall()
-        reconciled = []
+        reconciled = self.reconcile_shared()
         for row in rows:
+            if self.member_session(row["id"]):
+                continue
             order = json.loads(row["request"])
             matches = self.matching_runs(order)
             if len(matches) > 1:
@@ -1229,6 +1271,9 @@ class Polygon:
 
     def execute_next(self):
         self.reconcile()
+        shared = self.claim_shared()
+        if shared:
+            return self.execute_shared(shared)
         row = self.claim()
         if not row:
             return {"status": "idle_or_busy"}
@@ -1289,9 +1334,18 @@ class Polygon:
         with self.connect() as con:
             rows = con.execute("SELECT * FROM jobs WHERE status='running' AND mode='automatic'").fetchall()
         if not rows:
-            return {"status": "no_active_automatic_order"}
+            with self.connect() as con:
+                active = con.execute("SELECT request FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone()
+            if active:
+                rows = [self.get(json.loads(active["request"])["orderIds"][0])]
+            else:
+                return {"status": "no_active_automatic_order"}
         row = rows[0]
         order = json.loads(row["request"])
+        session = self.member_session(row["id"])
+        if session and session["status"] == "preparing" and not session["plan"]:
+            # The shared child requires running+frozen plan; preparation cannot launch.
+            return self.finish_shared(session["id"], reason="Interrupted during shared preparation before dispatch")
         executor = Path(self.attempt_plan(order)["executor"]) if order.get("schemaVersion") == 2 else self.executor()[0]
         # Native runner recovery verifies live process ownership; never bypass it.
         result = subprocess.run([sys.executable, str(executor / "run.py"), "--config", str(self.evidence_dir(row["id"]) / "config.json"), "recover"], capture_output=True, text=True)
@@ -1299,7 +1353,11 @@ class Polygon:
             return {"status": "recovery_refused", "output": result.stdout, "error": result.stderr}
         recovered = self.reconcile()
         if not recovered and not self.matching_runs(order):
-            self.finish(row["id"], "blocked", "Interrupted before a recorded game session; no automatic retry")
+            session = self.member_session(row["id"])
+            if session:
+                self.finish_shared(session["id"], reason="Interrupted before a recorded game session; no automatic retry")
+            else:
+                self.finish(row["id"], "blocked", "Interrupted before a recorded game session; no automatic retry")
         return {"reconciled": recovered, "status": self.get(row["id"])["status"]}
 
     def assisted_start(self, job):
@@ -1421,8 +1479,8 @@ class Polygon:
         folder = self.local / "voice"
         folder.mkdir(exist_ok=True)
         with (folder / "listener.log").open("a", encoding="utf-8") as log:
-            child = subprocess.Popen([sys.executable, str(script), "--device", device, "--wake", "полигон", "--heartbeat", "0"], stdout=log, stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
-        return {"pid": child.pid, "device": device, "wakeWord": "полигон", "healthRequired": "http://127.0.0.1:8931/api/health", "notice": "Launch is not microphone qualification; verify health and an actual spoken phrase. Existing listener ownership is respected."}
+            child = subprocess.Popen([sys.executable, str(script), "--device", device, "--wake", "Р С—Р С•Р В»Р С‘Р С–Р С•Р Р…", "--heartbeat", "0"], stdout=log, stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
+        return {"pid": child.pid, "device": device, "wakeWord": "Р С—Р С•Р В»Р С‘Р С–Р С•Р Р…", "healthRequired": "http://127.0.0.1:8931/api/health", "notice": "Launch is not microphone qualification; verify health and an actual spoken phrase. Existing listener ownership is respected."}
 
     def pending(self):
         with self.connect() as con:
@@ -1471,6 +1529,9 @@ class Polygon:
                 item = {k: row[k] for k in ("id", "mode", "subject", "origin", "status", "submitted", "note", "packet", "delivery")}
                 request = json.loads(row["request"])
                 cycle = request.get("cycle")
+                session = self.member_session(row["id"])
+                item["sharedSessionId"] = session["id"] if session else None
+                item["sharedSessionStatus"] = session["status"] if session else None
                 item["orderSchemaVersion"] = request["schemaVersion"]
                 item["subjectSpecificationSha256"] = subject_contract.subject_identity(request) if request["schemaVersion"] == 2 else None
                 plan = con.execute("SELECT sha256 FROM platform_attempts WHERE id=?", (row["id"],)).fetchone()
@@ -1522,6 +1583,10 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     submit = sub.add_parser("submit")
     submit.add_argument("order", type=Path)
+    session = sub.add_parser("session-register", help="Group compatible prepared orders; launch authority remains separate")
+    session.add_argument("request", type=Path)
+    for command in ("session-show", "session-cancel", "_execute-session"):
+        sub.add_parser(command).add_argument("id")
     register = sub.add_parser("cycle-register", help="Only after verifying a direct owner start; never inferred from an order")
     register.add_argument("authorization", type=Path)
     batch = sub.add_parser("batch-release", help="Only after the owner asks Polygon to start prepared standard orders")
@@ -1573,6 +1638,10 @@ def main(argv=None):
     try:
         polygon = Polygon(session_root(args.root))
         if args.command == "submit": result = polygon.submit(args.order)
+        elif args.command == "session-register": result = polygon.register_session(args.request)
+        elif args.command == "session-cancel": result = polygon.cancel_session(args.id)
+        elif args.command == "session-show": result = polygon.session_show(args.id)
+        elif args.command == "_execute-session": return polygon.child_shared(args.id)
         elif args.command == "cycle-register": result = polygon.register_cycle(args.authorization)
         elif args.command == "batch-release": result = polygon.release_batch(args.authorization)
         elif args.command == "slot-request": result = polygon.request_slot(args.request)
