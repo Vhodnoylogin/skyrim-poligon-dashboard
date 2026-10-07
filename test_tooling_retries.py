@@ -114,6 +114,27 @@ class ToolingRetryTests(unittest.TestCase):
         with self.p.connect() as con:
             self.assertEqual(con.execute('SELECT COUNT(*) FROM jobs').fetchone()[0], 1)
 
+    def test_retry_auxiliary_proof_uses_attempt_native_owner(self):
+        order, ticket, plan = self.claimed()
+        run = self.native(ticket)
+        check = {'name': 'executor bootstrap', 'result': 'passed', 'provenance': {
+            'schemaVersion': 1, 'component': 'skyrim-autotest', 'stage': 'bootstrap',
+            'role': 'tooling', 'runId': 'new-retry', 'checkId': 'bootstrap-1'}}
+        result = mod.read(run / 'result.json')
+        result['checks'].append(check)
+        mod.write(run / 'result.json', result)
+        state = mod.read(run / 'state.json')
+        state['checks'] = result['checks']
+        mod.write(run / 'state.json', state)
+        (run / 'steps.jsonl').write_text(mod.json.dumps({'kind': 'executor-check', **check}) + '\n')
+        self.p.finish_retry(ticket['id'], run)
+        self.final(ticket)
+        row = self.p.retry_board()[0]
+        self.assertEqual(row['testOutcome'], 'tested_successfully')
+        self.assertEqual(row['coverage']['required'], 1)
+        self.assertEqual(row['auxiliaryCoverage']['passed'], 1)
+        self.assertEqual(self.original, {p: mod.digest(p) for p in self.original})
+
     def test_started_subject_or_unrestored_failure_is_not_tooling_retry(self):
         order, ticket, path = self.ticket(checks=[{'name': 'subject-response', 'result': 'failed'}])
         with self.assertRaisesRegex(ValueError, 'pre-subject'):

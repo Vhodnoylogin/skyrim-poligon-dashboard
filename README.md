@@ -302,6 +302,8 @@ chat's rule, not an automatically established mod defect. `recorded` means data
 exists, not tested or accepted. Test outcome/coverage are separate final-report
 fields; technical execution termination stays in logs. No tested label is assigned
 until a proven testing attempt ends and its report is verified. Missing capabilities/data stay unavailable.
+Typed executor bootstrap checks require pinned same-run state/result/log corroboration.
+Their technical coverage stays separate from required origin checks; see docs/test-results.md.
 
 After testing has factually begun, ended, and the environment is restored, finish
 collection and register a verified final report with `report-ready`. Only eligible

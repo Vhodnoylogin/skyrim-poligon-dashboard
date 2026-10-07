@@ -451,5 +451,6 @@ class ToolingRetries:
                            'testingLifecycle': 'completed' if projection and projection['testingStarted'] else 'not_started',
                            'testOutcome': projection['outcome'] if projection else None,
                            'coverage': projection['coverage'] if projection else None,
+                           'auxiliaryCoverage': projection.get('auxiliaryCoverage') if projection else None,
                            'notificationEligibility': report['eligibility'] if report else None})
         return result

@@ -104,6 +104,29 @@ class SharedSessionTests(unittest.TestCase):
         self.assertEqual(self.p.pending()[0]['threadId'], 'thread-1')
         self.assertEqual(self.p.reconcile(), [])
 
+    def test_shared_bootstrap_is_auxiliary_for_each_member_and_unknown_checks_survive(self):
+        orders, plan = self.prepared()
+        run = self.native_run(plan)
+        check = {'name': 'executor bootstrap', 'result': 'passed', 'provenance': {
+            'schemaVersion': 1, 'component': 'skyrim-autotest', 'stage': 'bootstrap',
+            'role': 'tooling', 'runId': 'shared-run', 'checkId': 'bootstrap-1'}}
+        result = mod.read(run / 'result.json')
+        result['checks'].append(check)
+        result['checks'].append({'name': 'unproven extra check', 'result': 'passed'})
+        mod.write(run / 'result.json', result)
+        state = mod.read(run / 'state.json')
+        state['checks'] = result['checks']
+        mod.write(run / 'state.json', state)
+        (run / 'steps.jsonl').write_text(mod.json.dumps({'kind': 'executor-check', **check}) + '\n')
+        self.p.reconcile()
+        for order in orders:
+            self.finalize(order)
+        for row in self.p.board():
+            self.assertEqual(row['testOutcome'], 'incomplete')
+            self.assertEqual(row['coverage']['required'], 1)
+            self.assertEqual(row['auxiliaryCoverage']['passed'], 1)
+            self.assertEqual(row['coverage']['checks'][-1]['role'], 'unknown')
+
     def test_failure_in_first_member_never_starts_second(self):
         orders, plan = self.prepared()
         self.native_run(plan, [{'name': 'm0-0', 'result': 'failed'}], reason='Assertion failed: m0-0', outcome='failed')

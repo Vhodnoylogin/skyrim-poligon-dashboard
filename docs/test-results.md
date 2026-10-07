@@ -155,3 +155,67 @@ add these pins; separately retained supplementary manifests remain historical.
 This collection fix changes neither assertion outcomes nor measurement quality.
 An observed action remains an observation. Sampled holding does not establish
 uninterrupted holding during unobserved intervals.
+
+## Executor-generated auxiliary technical checks
+
+New executor bootstrap checks may carry typed provenance instead of entering the
+origin's required coverage as unknown. This is additive report metadata, not an
+order/schema change, launch permission or a reason to recompute an existing report.
+Legacy untyped checks retain their unknown classification, regardless of their name.
+
+The producer must append the same check to native state.checks/result.checks:
+
+```json
+{
+  "name": "new game world transition observed",
+  "result": "passed",
+  "provenance": {
+    "schemaVersion": 1,
+    "component": "skyrim-autotest",
+    "stage": "bootstrap",
+    "role": "tooling",
+    "runId": "EXACT NATIVE state.id",
+    "checkId": "new-game-world-transition"
+  }
+}
+```
+
+Exactly these six provenance keys are accepted. Version is integer 1; component,
+stage and role are the exact constants shown. checkId is unique within the run
+and matches `[a-z0-9][a-z0-9-]{0,79}`. The name is descriptive, not an allowlist.
+Additional check observation fields are allowed. Supported results are passed,
+failed, not_run and unavailable. Emit once before collection:
+
+```python
+session.log('executor-check', name=check['name'], result=check['result'],
+            provenance=check['provenance'])
+```
+
+Pinned state.json, result.json and steps.jsonl must corroborate exactly one
+name/result/provenance triple: one result check, one retained state check and one
+executor-check event with that checkId. result.id and provenance.runId must equal
+state.id. state.order.id must equal the actual packet native owner: the original
+order, the retry attemptId, or the shared session anchorOrderId. A direct executor
+qualification without an order is insufficient for Polygon subject reporting.
+The packet's ordinary hash/identity verification still applies; these are typed
+attestations from the qualified executor, not trust in an arbitrary label.
+
+Duplicates, missing/unpinned/mismatched proof and unsupported typing remain
+unknown and prevent success. A typed check cannot fulfill an origin's declared
+subject start/check, even with a colliding name; executor-check log events never
+establish subject start. Required subject/fixture/tooling checks retain the
+immutable origin roles. In a shared session, other members' checks are excluded
+only by the pinned session manifest; common auxiliary checks and unknown extras
+remain visible to each member.
+
+`testResult.coverage` retains required checks and unclassified extras.
+`testResult.auxiliaryCoverage` separately lists recognized technical checks,
+provenance and performed/passed/failed/not_run/unavailable counts. A healthy
+bootstrap neither increases required coverage nor establishes subject progress.
+An auxiliary failure after subject start records interruptionObserved and an
+external interruption, while preserving any subject mismatch. Auxiliary
+not_run/unavailable prevents success. The board displays these technical counts
+separately, including retry attempts. Requested data and all completion,
+restoration, collection, final-report and exact-origin notification gates remain.
+Existing final reports, packets, orders and deliveries are never rewritten or
+resent to add this classification.

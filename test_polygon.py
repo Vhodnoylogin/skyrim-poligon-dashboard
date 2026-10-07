@@ -127,7 +127,7 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Unsafe'):
             mod.raw_evidence_pins(run)
 
-    def final_fixture(self, checks, reason="", outcome="failed", restored=True):
+    def final_fixture(self, checks, reason="", outcome="failed", restored=True, native_proof=None):
         self.automatic_submit()
         self.order["testing"]["checks"].append({"name": "later-check", "role": "subject"})
         # Author this plan before submission under a new immutable fixture ID.
@@ -138,6 +138,13 @@ class Tests(unittest.TestCase):
                   "done": True, "restored": restored, "restoreErrors": []})
         mod.write(folder / "result.json", {"checks": checks, "result": outcome, "reason": reason,
                   "restored": restored, "restoreErrors": []})
+        if native_proof:
+            for name in ("state", "result"):
+                target = folder / (name + ".json")
+                value = mod.read(target)
+                value.update(native_proof.get(name, {}))
+                mod.write(target, value)
+            (folder / "steps.jsonl").write_text("".join(json.dumps(e) + "\n" for e in native_proof.get("events", [])), encoding="utf-8")
         return self.p.finish("final-fixture", outcome, reason, folder, restored)
 
     def test_before_subject_boundary_never_marks_tested_or_notifies(self):

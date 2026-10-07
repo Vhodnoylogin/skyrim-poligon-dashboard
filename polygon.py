@@ -776,27 +776,81 @@ class Polygon(SharedSessions, ToolingRetries):
                 "restored": state.get("restored"), "restoreErrors": state.get("restoreErrors"),
                 "evidence": str(Path(run) / "steps.jsonl") if run else None}
 
+    @staticmethod
+    def executor_auxiliary_checks(order, packet, result, actual, pinned_paths):
+        """Recognize typed executor attestations only with pinned same-run corroboration."""
+        run = packet.get("runDirectory")
+        if not run:
+            return []
+        state_path, log_path = Path(run) / "state.json", Path(run) / "steps.jsonl"
+        if not {state_path.resolve(), log_path.resolve()} <= pinned_paths:
+            return []
+        state = read(state_path)
+        owner = packet.get("sharedSession", {}).get("anchorOrderId", packet.get("attemptId", order["id"]))
+        if not isinstance(state.get("id"), str) or not state["id"] or result.get("id") != state["id"] or state.get("order", {}).get("id") != owner:
+            return []
+        events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+        accepted = []
+        for check in actual:
+            provenance = check.get("provenance")
+            if not isinstance(provenance, dict) or set(provenance) != {"schemaVersion", "component", "stage", "role", "runId", "checkId"}:
+                continue
+            if (type(provenance["schemaVersion"]) is not int or provenance["schemaVersion"] != 1
+                    or provenance["component"] != "skyrim-autotest" or provenance["stage"] != "bootstrap"
+                    or provenance["role"] != "tooling" or provenance["runId"] != state["id"]
+                    or not isinstance(provenance["checkId"], str) or not SAFE_ID.fullmatch(provenance["checkId"])
+                    or not isinstance(check.get("name"), str) or not check["name"].strip()
+                    or check.get("result") not in ("passed", "failed", "not_run", "unavailable")):
+                continue
+            # Duplicate identities/names and partial attestations cannot hide unknown evidence.
+            if sum(c.get("name") == check["name"] for c in actual) != 1 or sum(
+                    isinstance(c.get("provenance"), dict) and c["provenance"].get("checkId") == provenance["checkId"] for c in actual) != 1:
+                continue
+            fields = {"name": check["name"], "result": check["result"], "provenance": provenance}
+            same_check = lambda c: all(c.get(k) == v for k, v in fields.items())
+            logged = [e for e in events if e.get("kind") == "executor-check" and
+                      isinstance(e.get("provenance"), dict) and e["provenance"].get("checkId") == provenance["checkId"]]
+            retained = [c for c in state.get("checks", []) if isinstance(c.get("provenance"), dict) and
+                        c["provenance"].get("checkId") == provenance["checkId"]]
+            if len(logged) == len(retained) == 1 and same_check(logged[0]) and same_check(retained[0]):
+                accepted.append(check)
+        return accepted
+
     def test_projection(self, order, packet):
         run = packet.get("runDirectory")
         pinned_paths = {Path(e["path"]).resolve() for e in packet["files"]}
         result_path = Path(run) / "result.json" if run else None
         result = read(result_path) if result_path and result_path.resolve() in pinned_paths else {}
         actual = result.get("checks") or []
+        auxiliary = self.executor_auxiliary_checks(order, packet, result, actual, pinned_paths)
         shared = packet.get("sharedSession")
         if shared:
             names = shared["checkNames"]
-            actual = [{**c, "name": names[c["name"]]} for c in actual if c.get("name") in names]
+            manifest_path = Path(shared["path"]) if shared.get("path") else None
+            manifest = read(manifest_path) if manifest_path and manifest_path.resolve() in pinned_paths else {}
+            all_names = {name for member in manifest.get("members", []) for name in member["checkNames"]}
+            auxiliary = [c for c in auxiliary if c.get("name") not in all_names and c.get("name") not in names]
+            actual = [{**c, "name": names[c["name"]]} if c.get("name") in names else c
+                      for c in actual if c.get("name") in names or c.get("name") not in all_names]
+        # Executor-origin evidence cannot satisfy an origin's declared subject boundary/check.
+        required_names = {c["name"] for c in (order.get("testing") or {}).get("checks", [])}
+        boundary = (order.get("testing") or {}).get("start", {})
+        if boundary.get("kind") == "check":
+            required_names.add(boundary["name"])
+        collisions = {c.get("name") for c in actual if c.get("provenance") and c.get("name") in required_names}
+        auxiliary = [c for c in auxiliary if c.get("name") not in required_names]
+        actual = [c for c in actual if c not in auxiliary]
         testing = order.get("testing")
         started = False
         if testing:
             start = testing["start"]
             if start["kind"] == "check":
-                started = any(c.get("name") == start["name"] for c in actual)
+                started = start["name"] not in collisions and any(c.get("name") == start["name"] for c in actual)
             else:
                 path = Path(run) / "steps.jsonl" if run else self.evidence_dir(order["id"]) / "observations.jsonl"
                 events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.resolve() in pinned_paths else []
                 if start["kind"] == "event" and run:
-                    started = any(e.get("kind") == start["event"] and e.get("name") == start["name"] for e in events)
+                    started = any(e.get("kind") != "executor-check" and e.get("kind") == start["event"] and e.get("name") == start["name"] for e in events)
                 elif start["kind"] == "observation" and not run:
                     started = any(s.get("query") == start["query"] and s.get("response") is not None
                                   for e in events for s in e.get("observations", []))
@@ -805,7 +859,7 @@ class Polygon(SharedSessions, ToolingRetries):
         for check in plan:
             matches = [c for c in actual if c.get("name") == check["name"]]
             status = matches[0].get("result") if len(matches) == 1 else "not_run" if not matches else "unavailable"
-            if status not in ("passed", "failed", "not_run"):
+            if check["name"] in collisions or status not in ("passed", "failed", "not_run"):
                 status = "unavailable"
             coverage.append({"name": check["name"], "role": check["role"], "status": status})
         names = {c["name"] for c in plan}
@@ -815,14 +869,15 @@ class Polygon(SharedSessions, ToolingRetries):
         cause = self.execution_summary(order, run, packet["executionOutcome"], packet["reason"])
         external = cause["terminationCause"] in ("pre_session_refusal", "unexpected_process_exit", "operational_interruption")
         failed_subject = any(c["role"] == "subject" and c["status"] == "failed" for c in coverage)
-        failed_tool = any(c["role"] in ("fixture", "tooling") and c["status"] == "failed" for c in coverage)
+        failed_tool = (any(c["role"] in ("fixture", "tooling") and c["status"] == "failed" for c in coverage)
+                       or any(c["result"] == "failed" for c in auxiliary))
         if not started:
             outcome = "not_started"
         elif failed_subject:
             outcome = "tested_with_errors"
         elif external or failed_tool:
             outcome = "interrupted_external"
-        elif plan and coverage and all(c["status"] == "passed" and c["role"] != "unknown" for c in coverage) and packet["executionOutcome"] == "passed":
+        elif plan and coverage and all(c["status"] == "passed" and c["role"] != "unknown" for c in coverage) and all(c["result"] == "passed" for c in auxiliary) and packet["executionOutcome"] == "passed":
             outcome = "tested_successfully"
         else:
             outcome = "incomplete"
@@ -830,6 +885,10 @@ class Polygon(SharedSessions, ToolingRetries):
                 "interruptionObserved": external or failed_tool, "subjectMismatchObserved": failed_subject,
                 "coverage": {"required": len(plan) if testing else None, "performed": sum(c["status"] in ("passed", "failed") for c in coverage),
                              **counts, "checks": coverage},
+                "auxiliaryCoverage": {"performed": sum(c["result"] in ("passed", "failed") for c in auxiliary),
+                                      **{s: sum(c["result"] == s for c in auxiliary) for s in ("passed", "failed", "not_run", "unavailable")},
+                                      "checks": [{"name": c["name"], "role": "tooling", "status": c["result"],
+                                                  "provenance": c["provenance"]} for c in auxiliary]},
                 "requestedData": [{"name": name, "status": "unassessed"} for name in order["collect"]],
                 "execution": cause, "analysis": None}
 
@@ -1607,6 +1666,7 @@ class Polygon(SharedSessions, ToolingRetries):
                     item["testOutcome"] = entry["testResult"]["outcome"]
                     item["testingLifecycle"] = "completed" if entry["testResult"]["testingStarted"] else "not_started"
                     item["coverage"] = entry["testResult"]["coverage"]
+                    item["auxiliaryCoverage"] = entry["testResult"].get("auxiliaryCoverage")
                     item["finalReport"] = registered["path"]
                 result.append(item)
         return result + self.retry_board()
