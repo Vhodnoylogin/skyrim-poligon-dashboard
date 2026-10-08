@@ -160,8 +160,29 @@ class SeparationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "configuration belongs"):
             self.submit()
         self.order.pop("config")
+        self.order["inputs"].append({"path": str(self.provider), "sha256": mod.digest(self.provider), "role": "subject"})
+        order = self.claimed()
+        with self.assertRaisesRegex(ValueError, "overlap platform tools"):
+            self.p.prepare_platform(order)
+
+    def test_identical_game_dependency_can_overlap_platform_and_evidence(self):
+        for path in (self.provider, self.evidence):
+            self.order["inputs"].append({"path": str(path), "sha256": mod.digest(path), "role": "dependency"})
+        order = self.claimed()
+        before = copy.deepcopy(order)
+        plan = self.p.prepare_platform(order)
+        self.assertEqual(order, before)
+        for path in (self.provider, self.evidence):
+            self.assertIn({"path": str(path), "sha256": mod.digest(path)}, plan["pins"])
+        self.provider.write_bytes(b"changed dependency")
+        with self.assertRaisesRegex(ValueError, "Platform changed"):
+            self.p.verify_platform(order)
+
+    def test_shared_dependency_requires_identical_hash(self):
         self.order["inputs"].append({"path": str(self.provider), "sha256": mod.digest(self.provider), "role": "dependency"})
         order = self.claimed()
+        self.provider.write_bytes(b"new qualified provider, stale dependency")
+        self.qualify()
         with self.assertRaisesRegex(ValueError, "overlap platform tools"):
             self.p.prepare_platform(order)
 

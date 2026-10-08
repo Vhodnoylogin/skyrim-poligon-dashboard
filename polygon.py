@@ -1143,9 +1143,13 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             raise ValueError("Platform configuration lacks qualification")
         scenario = subject_contract.compile_plan(order["subjectPlan"], manifest["operations"])
         validate(scenario)
-        # Do not permit origin/provider overlap to masquerade as a changed mod build.
-        if {p["path"] for p in order["inputs"]} & {p["path"] for p in pins}:
-            raise ValueError("Subject inputs overlap platform tools; explicitly correct the new subject order")
+        # A game dependency can also be used by the qualified platform. Preserve
+        # both pins, but never admit a provider as the subject or accept drift.
+        platform_pins = {str(Path(p["path"]).resolve()).casefold(): p["sha256"] for p in pins}
+        for entry in order["inputs"]:
+            shared_hash = platform_pins.get(str(Path(entry["path"]).resolve()).casefold())
+            if shared_hash is not None and (entry.get("role") != "dependency" or entry["sha256"] != shared_hash):
+                raise ValueError("Subject inputs overlap platform tools without an identical dependency pin")
         plan = {"schemaVersion": 1, "orderId": order["id"], "subjectOrderSha256": subject_contract.identity(order),
                 "subjectSpecificationSha256": subject_contract.subject_identity(order),
                 "interface": subject_contract.INTERFACE, "executor": str(executor), "pins": pins,
