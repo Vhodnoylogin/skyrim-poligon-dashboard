@@ -10,6 +10,38 @@ def api():
 
 
 class PostStartContinuations:
+    def continuation_cycle_review(self, ticket, order):
+        """Separate operator-owned replay; never reactivate an origin cycle/slot."""
+        m = api()
+        review = ticket.get('authorityReview', {})
+        retained = review.get('cycleReplay')
+        if (ticket.get('kind') != 'post-start-tooling'
+                or review.get('cycleSubjectReplayPermitted') is not True
+                or review.get('preserveCycleState') is not True
+                or not isinstance(retained, dict)):
+            raise ValueError('Cycle tooling replay needs separate explicit operator review')
+        cycle = order['cycle']
+        with self.connect() as con:
+            origin = con.execute('SELECT * FROM cycles WHERE id=?', (cycle['id'],)).fetchone()
+            slot = con.execute('SELECT * FROM cycle_slots WHERE id=?', (cycle['slotId'],)).fetchone()
+        if (not origin or origin['status'] != 'blocked' or not slot or slot['status'] != 'released'
+                or slot['cycle_id'] != cycle['id'] or slot['order_id'] != order['id']
+                or slot['iteration'] != cycle['iteration'] or not slot['receipt']):
+            raise ValueError('Cycle replay requires the blocked original and its restored released slot')
+        authorization = json.loads(origin['authorization'])
+        if (authorization['sourceChat'] != order['sourceChat']
+                or authorization['sourceThreadId'] != order['sourceThreadId']):
+            raise ValueError('Cycle replay origin changed')
+        expected = {'cycleId': cycle['id'], 'slotId': cycle['slotId'], 'iteration': cycle['iteration'],
+                    'authorizationSha256': hashlib.sha256(origin['authorization'].encode()).hexdigest(),
+                    'grantSha256': self.slot_view(slot)['grantSha256'],
+                    'receiptSha256': hashlib.sha256(slot['receipt'].encode()).hexdigest()}
+        if retained != expected:
+            raise ValueError('Cycle replay provenance changed')
+        self.checked_pin(json.loads(slot['receipt']))
+        # Existing retry ownership serializes all installation/game dispatch. Its
+        # current per-order owner authority is separate from the stopped cycle.
+
     def register_continuation(self, path):
         return self._register_retry(path, post_start=True)
 

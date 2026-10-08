@@ -22,8 +22,18 @@ Require the predecessor's verified packet and already registered final report:
 factual start, ended collection, native done/restored/no restoreErrors, exact native
 order/attempt identity and unchanged subject. A completed shared member may be
 replayed alone only after the whole shared session is complete; other members are
-not replayed. Orders with a cycle field retain their single-origin slot contract
-and are refused. An externally orchestrated bounded full cycle with a standard
+not replayed. Cycle-bound subjects require a separate explicit operator review:
+the original cycle must remain blocked and its exact acknowledged slot must be
+released after verified restoration. The ticket's authorityReview adds
+cycleSubjectReplayPermitted=true, preserveCycleState=true and cycleReplay containing
+cycleId, slotId, iteration, authorizationSha256 (exact stored cycle authorization
+UTF-8 bytes), grantSha256 and receiptSha256 (exact stored receipt UTF-8 bytes).
+These are checked again at dispatch. Current per-order human authority must
+independently permit this one tooling replay; the stopped cycle grants nothing.
+The new attempt uses the exclusive retry installation/game barrier, permits no
+origin installation and never reactivates or changes the old cycle/slot/quota.
+Cancellation, unreleased slots or changed provenance refuse replay. Pretest
+cycle retries remain refused. An externally orchestrated bounded full cycle with a standard
 schema2 order is supported; registration never reopens a stopped cycle/slot.
 
 Require a separately pinned reviewed tooling-failure proof with native state and

@@ -65,6 +65,9 @@ class ToolingRetries:
             raise ValueError('Retain reviewed cumulative launch accounting')
         if ticket.get('kind') == 'post-start-tooling':
             self.continuation_authority(ticket, authority)
+        order = json.loads(self.get(ticket['orderId'])['request'])
+        if order.get('cycle'):
+            self.continuation_cycle_review(ticket, order)
         if str(self.checked_pin(ticket['platform'])) != str(Path(self.host()['platformManifest']).resolve()):
             raise ValueError('Retry must use the reviewed current qualified platform')
 
@@ -72,8 +75,10 @@ class ToolingRetries:
         m = api()
         original = self.get(ticket['orderId'])
         order = json.loads(original['request'])
-        if order['schemaVersion'] != 2 or order['mode'] != 'automatic' or order.get('cycle'):
+        if order['schemaVersion'] != 2 or order['mode'] != 'automatic':
             raise ValueError('Tooling retry supports schema2 standard automatic subjects; cycle slots remain unchanged')
+        if order.get('cycle'):
+            self.continuation_cycle_review(ticket, order)
         previous = ticket.get('previousAttemptId')
         if previous:
             row = self.retry_show(previous)
