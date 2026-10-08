@@ -1,6 +1,12 @@
 # Skyrim-Poligon-Dashboard development
 
 Read README.md before editing. This is a chat service and dashboard, not a game mod.
+For a proven tooling fault after factual subject start read docs/post-start-continuations.md.
+continuation-register is a separate reviewed full replay from the original fixture
+on the same immutable standard schema2 subject, not a pretest abort. Preserve old
+packets/reports/coverage and cumulative physical starts; no checkpoint skip, cloned
+mod order, reopened job, auto-reticket or automatic hold/slot clearance. Exact
+current owner authority, repaired platform qualification and restoration are required.
 For an owner's request to conduct an autotest, read docs/autotest-workflow.md.
 Prepare the ordinary mode-independent subject order, record its verified one-shot
 release with workflow=autotest and exact toolThreadId, hand off once to Polygon

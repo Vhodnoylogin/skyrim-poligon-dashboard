@@ -63,6 +63,8 @@ class ToolingRetries:
             m.required_string(review, key)
         if type(review.get('cumulativeActualLaunchesBefore')) is not int or review['cumulativeActualLaunchesBefore'] < 0:
             raise ValueError('Retain reviewed cumulative launch accounting')
+        if ticket.get('kind') == 'post-start-tooling':
+            self.continuation_authority(ticket, authority)
         if str(self.checked_pin(ticket['platform'])) != str(Path(self.host()['platformManifest']).resolve()):
             raise ValueError('Retry must use the reviewed current qualified platform')
 
@@ -80,7 +82,8 @@ class ToolingRetries:
             path = row['packet']
             packet = self.verify_retry_packet(row)
         else:
-            if original['status'] not in ('recorded', 'blocked') or not original['packet']:
+            allowed = ('recorded', 'blocked', 'delivered') if ticket.get('kind') == 'post-start-tooling' else ('recorded', 'blocked')
+            if original['status'] not in allowed or not original['packet']:
                 raise ValueError('Preserve an ended original packet before registering tooling continuation')
             _, packet = self.verify_packet(original)
             path = original['packet']
@@ -92,13 +95,16 @@ class ToolingRetries:
         if packet.get('subjectOrderSha256') != m.subject_contract.identity(order):
             raise ValueError('Original subject specification changed since predecessor packet')
         projection = self.test_projection(order, packet)
-        if not projection['startContractAvailable'] or projection['testingStarted']:
-            raise ValueError('Tooling-only continuation requires proven pre-subject abort')
-        abort = m.read(self.checked_pin(ticket['technicalAbort']))
-        if (abort.get('orderId') != order['id'] or abort.get('classification') != 'confirmed-tooling-pretest-abort'
-            or abort.get('subjectStarted') is not False or abort.get('done') is not True or abort.get('restored') is not True
-            or abort.get('restoreErrors') or abort.get('packetSha256') != ticket['previousPacketSha256']):
-            raise ValueError('Reviewed technical abort must bind exact pre-subject packet and restoration')
+        if ticket.get('kind') == 'post-start-tooling':
+            abort = self.continuation_predecessor(ticket, order, packet, previous, projection)
+        else:
+            if not projection['startContractAvailable'] or projection['testingStarted']:
+                raise ValueError('Tooling-only continuation requires proven pre-subject abort')
+            abort = m.read(self.checked_pin(ticket['technicalAbort']))
+            if (abort.get('orderId') != order['id'] or abort.get('classification') != 'confirmed-tooling-pretest-abort'
+                or abort.get('subjectStarted') is not False or abort.get('done') is not True or abort.get('restored') is not True
+                or abort.get('restoreErrors') or abort.get('packetSha256') != ticket['previousPacketSha256']):
+                raise ValueError('Reviewed technical abort must bind exact pre-subject packet and restoration')
         if previous and abort.get('attemptId') != previous:
             raise ValueError('Technical abort must identify the previous retry attempt')
         m.required_string(abort, 'reason')
@@ -116,13 +122,26 @@ class ToolingRetries:
             # Without a native run, no runner dispatch may be inferred as restored.
             if abort.get('actualGameLaunches') != 0 or packet.get('restored') not in (None, True):
                 raise ValueError('Pre-session refusal requires explicit zero-launch review')
+        if previous:
+            prior = json.loads(self.retry_show(previous)['request'])
+            if prior.get('kind') == 'post-start-tooling':
+                charged = packet['launchAccounting']['cumulativeActualLaunchesAfter']
+                if ticket['authorityReview']['cumulativeActualLaunchesBefore'] < charged:
+                    raise ValueError('Cumulative physical launch counter cannot reset across continuation modes')
         self.verify_inputs(order)
         return order
 
     def register_retry(self, path):
+        return self._register_retry(path, post_start=False)
+
+    def _register_retry(self, path, post_start=False):
         m = api()
         ticket = m.read(path)
         required = {'schemaVersion', 'id', 'orderId', 'previousPacketSha256', 'technicalAbort', 'ownerAuthority', 'authorityReview', 'platform'}
+        if post_start:
+            required = (required - {'technicalAbort'}) | {'kind', 'restartMode', 'technicalFailure', 'previousReport', 'launchAccounting'}
+            if ticket.get('kind') != 'post-start-tooling' or ticket.get('restartMode') != 'initial-fixture':
+                raise ValueError('Continuation must be a full post-start replay from initial fixture')
         if set(ticket) - (required | {'previousAttemptId'}) or not required <= set(ticket) or ticket['schemaVersion'] != 1:
             raise ValueError('Invalid tooling continuation ticket')
         for key in ('id', 'orderId'):
@@ -131,7 +150,8 @@ class ToolingRetries:
         if ticket['id'] == ticket['orderId']:
             raise ValueError('Attempt identity must differ from immutable subject order')
         # Paths in a ticket resolve from that file, not the current shell directory.
-        for key in ('technicalAbort', 'ownerAuthority', 'platform'):
+        proof_keys = ('technicalFailure', 'previousReport', 'launchAccounting') if post_start else ('technicalAbort',)
+        for key in (*proof_keys, 'ownerAuthority', 'platform'):
             pin = ticket[key]
             pin['path'] = str((Path(path).resolve().parent / m.required_string(pin, 'path')).resolve())
         canonical = json.dumps(ticket, sort_keys=True, ensure_ascii=False)
@@ -150,7 +170,7 @@ class ToolingRetries:
             if (latest and (latest['id'] != ticket.get('previousAttemptId') or latest['status'] not in ('recorded', 'blocked'))) or (not latest and ticket.get('previousAttemptId')):
                 raise ValueError('Tooling attempts form one ended, nonbranching chain')
             con.execute("INSERT INTO retry_attempts(id,order_id,request,created,status) VALUES(?,?,?,?,'queued')", (ticket['id'], order['id'], canonical, time.time()))
-            self.event(con, ticket['id'], 'tooling_retry_registered', 'Immutable subject ' + order['id'])
+            self.event(con, ticket['id'], 'post_start_continuation_registered' if post_start else 'tooling_retry_registered', 'Immutable subject ' + order['id'])
         return {'id': ticket['id'], 'orderId': order['id'], 'status': 'queued'}
 
     def claim_retry(self):
@@ -189,6 +209,8 @@ class ToolingRetries:
         order = self.retry_predecessor(ticket)
         plan = self.verify_platform(order, attempt_id=attempt_id)
         folder = self.local / 'retry-attempts' / attempt_id
+        if ticket.get('kind') == 'post-start-tooling':
+            self.freeze_continuation_review(ticket, folder)
         if m.read(folder / 'config.json') != plan['configuration'] or m.read(folder / 'scenario.json') != plan['scenario']:
             raise ValueError('Materialized retry plan changed')
         with self.connect() as con:
@@ -201,8 +223,20 @@ class ToolingRetries:
         from skyrim_autotest.config import load
         runner.configure(load(folder / 'config.json'))
         profile = self.source_profile(order, runner, output_dir=folder)
+        if ticket.get('kind') == 'post-start-tooling':
+            self.verify_inputs(order)
+            self.verify_platform(order, attempt_id=attempt_id)
+            if m.read(folder / 'config.json') != plan['configuration'] or m.read(folder / 'scenario.json') != plan['scenario']:
+                raise ValueError('Full continuation plan changed before native dispatch')
         with self.connect() as con:
             con.execute('BEGIN IMMEDIATE')
+            if ticket.get('kind') == 'post-start-tooling':
+                self.retry_authority(ticket)
+                if (con.execute('SELECT id FROM pipeline_holds').fetchone() or
+                        con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or
+                        con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone() or
+                        con.execute("SELECT id FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone()):
+                    raise ValueError('Owner/hold changed before continuation native dispatch')
             if con.execute('SELECT status FROM retry_attempts WHERE id=?', (attempt_id,)).fetchone()[0] != 'running':
                 raise ValueError('Retry ownership changed before native dispatch')
             con.execute('INSERT INTO attempts VALUES(?,?)', (attempt_id, time.time()))
@@ -219,6 +253,8 @@ class ToolingRetries:
             self.retry_authority(ticket)
             order = self.retry_predecessor(ticket)
             plan = self.prepare_platform(order, attempt_id=attempt_id)
+            if ticket.get('kind') == 'post-start-tooling':
+                self.freeze_continuation_review(ticket, folder)
             m.write(folder / 'config.json', plan['configuration'])
             m.write(folder / 'scenario.json', plan['scenario'])
         except (ValueError, OSError) as error:
@@ -273,6 +309,13 @@ class ToolingRetries:
                   'restored': True if run else None, 'files': files, 'requestedData': order['collect'], 'analysis': None,
                   'subjectOrderSha256': m.subject_contract.identity(order), 'finishedAt': time.time(),
                   'previousPacketSha256': json.loads(row['request'])['previousPacketSha256']}
+        ticket = json.loads(row['request'])
+        if ticket.get('kind') == 'post-start-tooling':
+            if run:
+                self.verify_continuation_review(ticket, folder)
+            packet.update(attemptKind='post_start_tooling', restartMode='initial-fixture',
+                          previousReportSha256=ticket['previousReport']['sha256'],
+                          launchAccounting=self.continuation_launch_accounting(ticket, run, attempt_id))
         path = folder / 'packet.json'
         m.write(path, packet)
         with self.connect() as con:
@@ -288,6 +331,15 @@ class ToolingRetries:
         _, packet = self.verify_packet({'id': order['id'], 'request': json.dumps(order), 'packet': row['packet']})
         if packet.get('attemptId') != row['id'] or packet.get('subjectOrderSha256') != m.subject_contract.identity(order) or packet.get('previousPacketSha256') != json.loads(row['request'])['previousPacketSha256']:
             raise ValueError('Retry subject/attempt identity mismatch')
+        ticket = json.loads(row['request'])
+        if ticket.get('kind') == 'post-start-tooling' and packet.get('runDirectory'):
+            self.verify_continuation_review(ticket, Path(row['packet']).parent,
+                                           {Path(p['path']).resolve() for p in packet['files']})
+        if ticket.get('kind') == 'post-start-tooling' and (packet.get('attemptKind') != 'post_start_tooling'
+                or packet.get('restartMode') != 'initial-fixture'
+                or packet.get('previousReportSha256') != ticket['previousReport']['sha256']
+                or packet.get('launchAccounting') != self.continuation_launch_accounting(ticket, packet.get('runDirectory'), row['id'])):
+            raise ValueError('Continuation replay identity or physical launch accounting mismatch')
         return packet
 
     def reconcile_retries(self):
@@ -383,6 +435,9 @@ class ToolingRetries:
                   'summary': request['summary'], 'collectionFinished': True, 'packet': row['packet'],
                   'packetSha256': m.digest(row['packet']), 'testResult': projection,
                   'eligibility': 'eligible' if projection['testingStarted'] else 'suppressed'}
+        if packet.get('attemptKind') == 'post_start_tooling':
+            report.update(attemptKind=packet['attemptKind'], restartMode=packet['restartMode'],
+                          launchAccounting=packet['launchAccounting'], previousReportSha256=packet['previousReportSha256'])
         target = self.local / 'final-reports' / request['id'] / 'report.json'
         with self.connect() as con:
             con.execute('BEGIN IMMEDIATE')
@@ -445,7 +500,10 @@ class ToolingRetries:
             order = self.retry_order(row)
             report = self.verify_retry_report(row) if row['report'] else None
             projection = report['testResult'] if report else None
-            result.append({'id': row['id'], 'subjectOrderId': order['id'], 'attemptKind': 'tooling_retry',
+            ticket = json.loads(row['request'])
+            accounting = self.verify_retry_packet(row).get('launchAccounting') if row['packet'] and ticket.get('kind') == 'post-start-tooling' else None
+            result.append({'id': row['id'], 'subjectOrderId': order['id'], 'attemptKind': 'post_start_tooling' if ticket.get('kind') == 'post-start-tooling' else 'tooling_retry',
+                           'restartMode': ticket.get('restartMode'), 'launchAccounting': accounting,
                            'subject': order['subject'], 'mode': 'automatic', 'workflow': 'standard',
                            'origin': order['sourceChat'], 'status': 'delivered' if row['receipt'] else row['status'],
                            'submitted': row['created'], 'note': 'Tooling-only continuation; original evidence retained',

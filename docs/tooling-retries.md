@@ -5,6 +5,9 @@ attempt ticket referencing the same immutable schema2 subject order. It creates
 no new mod order, changes no installed pins/scenario, resets no budgets and sends
 no preparatory origin message. This is an explicit operator repair protocol,
 not an automatic retry policy or permission supplied by a tool finding.
+For a confirmed tooling failure after factual subject start, use the distinct
+reviewed full-replay [post-start-continuations.md](post-start-continuations.md)
+protocol and continuation-register. The pretest command and proof stay unchanged.
 
 ## Verify authority and predecessor
 

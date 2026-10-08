@@ -112,6 +112,10 @@ For a confirmed tooling failure before factual subject testing, the operator may
 register a separate reviewed retry attempt without changing the mod order. See
 [tooling-retries.md](docs/tooling-retries.md) for proof, owner authority, qualified
 platform, FIFO, restoration and independent report/receipt gates. No automatic retry.
+After factual subject start, [post-start-continuations.md](docs/post-start-continuations.md)
+adds continuation-register for one separately reviewed full replay of the same
+standard schema2 subject, including delivered predecessors. Prior coverage/reports
+remain immutable and physical starts are charged cumulatively; no checkpoint resume.
 
 New mod orders use **schemaVersion2**: installed subject/dependency/fixture pins,
 an embedded `subjectPlan` using `polygon-actions/1`, factual testing boundaries and

@@ -29,6 +29,7 @@ import subject_contract
 from shared_sessions import SharedSessions
 from tooling_retries import ToolingRetries
 from autotest_workflow import AutotestWorkflow
+from post_start_continuations import PostStartContinuations
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 SHA = re.compile(r"[0-9a-f]{64}")
 READ_KINDS = {"state", "player", "refs", "scene", "vm", "world_observer"}
@@ -118,7 +119,7 @@ def owner_evidence(approval, path, require_deadline=True):
     return evidence
 
 
-class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow):
+class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinuations):
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.local = self.root / "local/skyrim-polygon"
@@ -1740,6 +1741,8 @@ def main(argv=None):
     submit.add_argument("order", type=Path)
     retry = sub.add_parser("retry-register", help="One reviewed pre-subject tooling attempt; original subject order is unchanged")
     retry.add_argument("request", type=Path)
+    continuation = sub.add_parser("continuation-register", help="Reviewed full replay after post-start tooling failure; old subject/evidence unchanged")
+    continuation.add_argument("request", type=Path)
     for name in ("retry-show", "_execute-retry"):
         sub.add_parser(name).add_argument("id")
     session = sub.add_parser("session-register", help="Group compatible prepared orders; launch authority remains separate")
@@ -1798,6 +1801,7 @@ def main(argv=None):
         polygon = Polygon(session_root(args.root))
         if args.command == "submit": result = polygon.submit(args.order)
         elif args.command == "retry-register": result = polygon.register_retry(args.request)
+        elif args.command == "continuation-register": result = polygon.register_continuation(args.request)
         elif args.command == "retry-show": result = polygon.retry_show(args.id)
         elif args.command == "_execute-retry": return polygon.child_retry(args.id)
         elif args.command == "session-register": result = polygon.register_session(args.request)
