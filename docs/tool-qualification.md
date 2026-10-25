@@ -46,6 +46,29 @@ restart selectors, physical probe kinds or postSteps. Owned save/load is allowed
 it is not a process restart. The candidate's validator and restart-budget planner
 must accept the scenario with zero reserved restarts.
 
+### A new qualification after an unresolved historical count
+
+Historical uncertainty does not become zero or an observed minimum when the owner
+authorizes a new bounded test. For that case only, set the request's explicit
+`cumulativeActualGameStartsBefore:null`. Its separately pinned accounting review
+must contain explicit `cumulativeActualGameStarts:null`,
+`accountingStatus:"historical_unknown"`, nonempty `verifiedBy`/`reason` and
+`historyPins:[{"path":"prior-packet.json","sha256":"ACTUAL-SHA256"}]`.
+Paths in historyPins resolve relative to the accounting review. Each unique pin
+must match a final packet registered in this same queue, with a supported
+qualification packet kind and explicit `cumulativeActualGameStartsAfter:null`.
+Missing fields, an empty history, invented/unregistered history, a known count or
+changed packet bytes refuse registration or dispatch. The history and accounting
+review remain pinned through collection and retained in the new result evidence.
+
+The new attempt still requires its own current owner authority, no competing
+holds/owners, exact native start accounting, one physical start at most and zero
+reserved restarts. Its `actualGameStarts` records only that new attempt, while
+both cumulative fields stay null even on success or a proven zero-start refusal.
+A successful new qualification does not repair or qualify the historical run.
+No counter epoch, history reset, automatic hold clearance or old-order release
+is introduced. The existing integer-baseline behavior is unchanged.
+
 Registration pins request, order, configuration, scenario, inputs, staged plugin
 sources, fixture ESS/SKSE, owner evidence, accounting, host config and dashboard
 Python source. It inventories all candidate files except Python bytecode/cache;

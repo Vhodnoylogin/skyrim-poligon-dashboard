@@ -76,7 +76,8 @@ class Qualifications:
             raise ValueError('Operator tool qualification requires one start and 900 seconds')
         m.owner_evidence(request, path)
         baseline = request.get('cumulativeActualGameStartsBefore')
-        if type(baseline) is not int or baseline < 0:
+        if ('cumulativeActualGameStartsBefore' not in request or
+                (baseline is not None and (type(baseline) is not int or baseline < 0))):
             raise ValueError('Reviewed cumulative actual start baseline required')
         for key in ('verifiedBy', 'reason'):
             m.required_string(request, key)
@@ -116,10 +117,48 @@ class Qualifications:
         if m.digest(accounting_path) != accounting.get('sha256'):
             raise ValueError('Launch accounting pin mismatch')
         review = m.read(accounting_path)
-        if (review.get('cumulativeActualGameStarts') != baseline or
+        if ('cumulativeActualGameStarts' not in review or
+                review['cumulativeActualGameStarts'] != baseline or
                 not review.get('verifiedBy') or not review.get('reason')):
             raise ValueError('Accounting review and baseline differ')
         pin(accounting_path)
+        request.pop('accountingPins', None)  # derived evidence; never caller-selected packet files
+        if baseline is None:
+            # An ended uncertain history never becomes zero merely because a
+            # newly authorized, independently bounded qualification is starting.
+            history = review.get('historyPins')
+            if (review.get('accountingStatus') != 'historical_unknown' or
+                    not isinstance(history, list) or not 1 <= len(history) <= 32):
+                raise ValueError('Unknown cumulative accounting requires reviewed historical packet pins')
+            m.required_string(review, 'verifiedBy')
+            m.required_string(review, 'reason')
+            with self.connect() as con:
+                registered = {r['id']: json.loads(r['packet']) for r in
+                              con.execute('SELECT id,packet FROM qualifications WHERE packet IS NOT NULL')}
+            history_pins, seen = [], set()
+            for item in history:
+                if not isinstance(item, dict):
+                    raise ValueError('Historical accounting packet pin required')
+                file = (accounting_path.parent / m.required_string(item, 'path')).resolve()
+                expected = item.get('sha256')
+                if (not isinstance(expected, str) or not m.SHA.fullmatch(expected) or
+                        m.digest(file) != expected or file in seen):
+                    raise ValueError('Historical accounting packet pin mismatch or duplicate')
+                prior = m.read(file)
+                reference = registered.get(prior.get('id'))
+                if (prior.get('schemaVersion') != 1 or prior.get('kind') not in
+                        ('qualification-held-diagnostic', 'tool-qualification-result',
+                         'qualification-pre-native-result') or
+                        'cumulativeActualGameStartsAfter' not in prior or
+                        prior['cumulativeActualGameStartsAfter'] is not None or
+                        not reference or Path(reference['path']).resolve() != file or
+                        reference.get('sha256') != expected):
+                    raise ValueError('Historical accounting must retain a registered unknown cumulative packet')
+                seen.add(file)
+                pin(file)
+                history_pins.append({'path': str(file), 'sha256': expected})
+            request['accountingPins'] = [{'path': str(accounting_path),
+                                          'sha256': m.digest(accounting_path)}, *history_pins]
         for item in order.get('inputs', []):
             file = (Path(request['order']).parent / item['path']).resolve()
             if m.digest(file) != item.get('sha256'):
@@ -335,6 +374,7 @@ class Qualifications:
                       'cumulativeActualGameStartsAfter': plan['cumulativeActualGameStartsBefore'],
                       'files': [{'path': str(folder / name), 'sha256': m.digest(folder / name)}
                                 for name in ('plan.json', 'dispatch-intent.json', 'child-exit.json', 'executor.log')]}
+            packet['files'].extend(plan.get('accountingPins', []))
             m.write(folder / 'packet.json', packet)
             with self.connect() as con:
                 con.execute("UPDATE qualifications SET status='recorded',packet=? WHERE id=?", (json.dumps({'path': str(folder / 'packet.json'), 'sha256': m.digest(folder / 'packet.json')}), identity))
@@ -362,13 +402,15 @@ class Qualifications:
                   'executionOutcome': result.get('result'), 'actualGameStarts': starts,
                   'attemptId': 'qualification-' + identity, 'reason': result.get('reason', ''),
                   'cumulativeActualGameStartsBefore': plan['cumulativeActualGameStartsBefore'],
-                  'cumulativeActualGameStartsAfter': plan['cumulativeActualGameStartsBefore'] + starts,
+                  'cumulativeActualGameStartsAfter': (None if plan['cumulativeActualGameStartsBefore'] is None
+                                                       else plan['cumulativeActualGameStartsBefore'] + starts),
                   'files': [], 'globalProviderQualified': False}
         for directory in (folder, state_path.parent):
             for file in sorted(directory.iterdir()):
                 if file.is_file() and file.suffix in ('.json', '.jsonl', '.log') and file.name != 'packet.json':
                     packet['files'].append({'path': str(file), 'sha256': m.digest(file)})
         packet['files'].extend(m.raw_evidence_pins(state_path.parent))
+        packet['files'].extend(plan.get('accountingPins', []))
         packet['profileArchivePins'] = [{'path': str(p), 'sha256': m.digest(p)}
                                         for p in sorted(archive.rglob('*')) if p.is_file()]
         packet['files'].extend(packet['profileArchivePins'])

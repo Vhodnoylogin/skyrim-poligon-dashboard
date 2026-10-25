@@ -110,6 +110,124 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'only once'):
             self.p.qualification_run('candidate-one')
 
+    def unknown_accounting_fixture(self):
+        prior = self.root / 'prior-packet.json'
+        m.write(prior, {'schemaVersion': 1, 'kind': 'tool-qualification-result',
+                       'id': 'prior-ended', 'actualGameStarts': 1,
+                       'cumulativeActualGameStartsBefore': None,
+                       'cumulativeActualGameStartsAfter': None, 'files': []})
+        reference = {'path': str(prior), 'sha256': m.digest(prior)}
+        with self.p.connect() as con:
+            con.execute("INSERT INTO qualifications VALUES('prior-ended','{}','recorded',NULL,?)",
+                        (json.dumps(reference),))
+        self.request['cumulativeActualGameStartsBefore'] = None
+        review = {'cumulativeActualGameStarts': None, 'verifiedBy': 'offline-reviewer',
+                  'reason': 'Prior cumulative history is unresolved; one new start is independently bounded',
+                  'accountingStatus': 'historical_unknown', 'historyPins': [reference]}
+        self.write_accounting(review)
+        return review, prior
+
+    def write_accounting(self, review):
+        m.write(self.root / 'accounting.json', review)
+        self.request['launchAccounting']['sha256'] = m.digest(self.root / 'accounting.json')
+
+    def test_unknown_history_preserves_null_cumulative_and_exact_current_start(self):
+        _, prior = self.unknown_accounting_fixture()
+        self.register()
+        packet = self.p.qualification_run('candidate-one')
+        self.assertEqual(packet['actualGameStarts'], 1)
+        self.assertIsNone(packet['cumulativeActualGameStartsBefore'])
+        self.assertIsNone(packet['cumulativeActualGameStartsAfter'])
+        self.assertIn({'path': str(prior), 'sha256': m.digest(prior)}, packet['files'])
+        self.assertEqual(len(self.p.pipeline_status()['holds']), 1)
+        self.assertEqual(self.p.qualification_collect('candidate-one'), packet)
+        prior.write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'evidence changed'):
+            self.p.qualification_collect('candidate-one')
+
+    def test_unknown_history_never_becomes_zero_before_native_admission(self):
+        self.unknown_accounting_fixture()
+        self.register()
+        with patch('qualification.subprocess.run', side_effect=subprocess.TimeoutExpired('child', 900)):
+            packet = self.p.qualification_run('candidate-one')
+        self.assertEqual(packet['actualGameStarts'], 0)
+        self.assertIsNone(packet['cumulativeActualGameStartsBefore'])
+        self.assertIsNone(packet['cumulativeActualGameStartsAfter'])
+        self.assertEqual(len(self.p.pipeline_status()['holds']), 1)
+
+    def test_unknown_accounting_requires_explicit_null_and_nonempty_reviewed_history(self):
+        review, _ = self.unknown_accounting_fixture()
+        for key in ('cumulativeActualGameStarts', 'accountingStatus', 'historyPins', 'reason'):
+            with self.subTest(key=key):
+                changed = dict(review)
+                del changed[key]
+                self.write_accounting(changed)
+                with self.assertRaises(ValueError):
+                    self.register()
+        self.write_accounting(review)
+        del self.request['cumulativeActualGameStartsBefore']
+        with self.assertRaisesRegex(ValueError, 'baseline required'):
+            self.register()
+
+    def test_unknown_accounting_rejects_false_known_unregistered_and_duplicate_history(self):
+        review, prior = self.unknown_accounting_fixture()
+        original = prior.read_bytes()
+        for variant in ('known', 'unregistered', 'duplicate', 'bad-hash'):
+            with self.subTest(variant=variant):
+                prior.write_bytes(original)
+                changed = json.loads(json.dumps(review))
+                with self.p.connect() as con:
+                    con.execute("UPDATE qualifications SET packet=? WHERE id='prior-ended'",
+                                (json.dumps(review['historyPins'][0]),))
+                if variant in ('known', 'unregistered'):
+                    data = m.read(prior)
+                    if variant == 'known':
+                        data['cumulativeActualGameStartsAfter'] = 11
+                    else:
+                        data['id'] = 'not-registered'
+                    m.write(prior, data)
+                    changed['historyPins'][0]['sha256'] = m.digest(prior)
+                    with self.p.connect() as con:
+                        con.execute("UPDATE qualifications SET packet=? WHERE id='prior-ended'",
+                                    (json.dumps(changed['historyPins'][0]),))
+                elif variant == 'duplicate':
+                    changed['historyPins'] *= 2
+                else:
+                    changed['historyPins'][0]['sha256'] = '0'*64
+                self.write_accounting(changed)
+                with self.assertRaises(ValueError):
+                    self.register()
+
+    def test_unknown_history_is_frozen_before_dispatch_and_does_not_add_launch_budget(self):
+        _, prior = self.unknown_accounting_fixture()
+        self.scenario['secondLaunch'] = True
+        m.write(self.root / 'scenario.json', self.scenario)
+        self.register()
+        original = prior.read_bytes()
+        prior.write_bytes(original + b' ')
+        with self.assertRaisesRegex(ValueError, 'pin changed'):
+            self.p.qualification_run('candidate-one')
+        prior.write_bytes(original)
+        packet = self.p.qualification_run('candidate-one')
+        self.assertEqual(packet['status'], 'running')
+        self.assertIn('launch budget exhausted',
+                      (self.p.local / 'qualifications/candidate-one/executor.log').read_text())
+
+    def test_successful_current_qualification_can_finish_without_rewriting_unknown_history(self):
+        self.unknown_accounting_fixture()
+        packet = self.release_fixture()
+        self.assertIsNone(packet['cumulativeActualGameStartsAfter'])
+        self.assertEqual(self.release()['status'], 'released')
+        self.assertIsNone(self.p.qualification_collect('candidate-one')['cumulativeActualGameStartsAfter'])
+        self.assertIsNone(m.read(self.root / 'prior-packet.json')['cumulativeActualGameStartsAfter'])
+
+    def test_invalid_known_accounting_types_remain_rejected(self):
+        for baseline in (-1, False, '0', 0.0):
+            with self.subTest(baseline=baseline):
+                self.request['cumulativeActualGameStartsBefore'] = baseline
+                with self.assertRaisesRegex(ValueError, 'baseline required'):
+                    self.register()
+
     def test_existing_hold_survives_registration_and_blocks_dispatch(self):
         self.p.hold_pipeline('old', 'Recovery review')
         self.register()
