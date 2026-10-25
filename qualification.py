@@ -57,6 +57,10 @@ class Qualifications:
         plan = json.loads(row['request'])
         if inventory(plan['executor']) != plan['executorPins']:
             raise ValueError('Candidate executor inventory changed')
+        if not authority and (self.local / 'qualifications' / plan['id'] / 'collection-repair.json').exists():
+            from qualification_collection_repair import verify
+            verify(self, row, plan)
+            return plan
         for pin in plan['pins']:
             if m.digest(pin['path']) != pin['sha256']:
                 raise ValueError('Qualification pin changed: ' + pin['path'])
@@ -357,6 +361,9 @@ class Qualifications:
             if packet.get('kind') == 'qualification-held-diagnostic':
                 from qualification_diagnostic import verify_archive
                 verify_archive(packet)
+            if packet.get('collectionRepair'):
+                from qualification_collection_repair import verify_packet_archive
+                verify_packet_archive(packet)
             return packet
         folder = self.local / 'qualifications' / identity
         if row['status'] != 'running' or not (folder / 'child-exit.json').is_file():
@@ -418,6 +425,10 @@ class Qualifications:
         packet['collectionFindings'] = self.collection_findings(state_path.parent)
         # This is evidence for operator/tool-chat review, never automatic platform acceptance.
         self.qualification_verify(row, authority=False)
+        if (folder / 'collection-repair.json').exists():
+            from qualification_collection_repair import evidence_pins
+            packet['collectionRepair'] = m.read(folder / 'collection-repair.json')
+            packet['files'].extend(evidence_pins(self, identity))
         m.write(folder / 'packet.json', packet)
         with self.connect() as con:
             con.execute("UPDATE qualifications SET status='recorded',packet=? WHERE id=?", (json.dumps({'path': str(folder / 'packet.json'), 'sha256': m.digest(folder / 'packet.json')}), identity))

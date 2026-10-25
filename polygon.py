@@ -794,6 +794,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
     @staticmethod
     def execution_summary(order, run, outcome, reason, pinned_paths=None):
         """Technical evidence projection; never a test-order result or mod diagnosis."""
+        reason = "" if reason is None else reason
         state = read(Path(run) / "state.json") if run and (Path(run) / "state.json").exists() else {}
         collection = Polygon.collection_findings(run, pinned_paths)
         if not run:
