@@ -76,6 +76,43 @@ class SeparationTests(unittest.TestCase):
             con.execute("UPDATE jobs SET status='running' WHERE id=?", (order["id"],))
         return order
 
+    def test_untouched_withdrawal_does_not_require_a_platform_or_create_a_hold(self):
+        self.submit()
+        self.p.hold_pipeline('retained-hold', 'Requires separate review')
+        packet = self.p.finish(self.order['id'], 'blocked', 'Withdrawn before launch')
+        self.assertIsNone(packet['runDirectory'])
+        self.assertIsNone(packet['restored'])
+        self.assertEqual(mod.read(self.p.evidence_dir(self.order['id']) / 'self-checks.json')['findings'], [])
+        self.assertEqual([h['id'] for h in self.p.pipeline_status()['holds']], ['retained-hold'])
+        self.assertFalse(self.p.pending())
+        self.assertIsNone(self.p.get(self.order['id'])['delivery'])
+
+    def test_missing_platform_still_holds_claimed_or_ambiguous_withdrawal(self):
+        mutations = ['claimed', 'attempt', 'platform', 'session', 'slot', 'trace', 'history']
+        for index, mutation in enumerate(mutations):
+            with self.subTest(mutation=mutation):
+                self.order['id'] = 'withdraw-' + str(index)
+                job = self.order['id']
+                self.submit()
+                with self.p.connect() as con:
+                    if mutation == 'claimed':
+                        con.execute("UPDATE jobs SET status='running' WHERE id=?", (job,))
+                    elif mutation == 'attempt':
+                        con.execute('INSERT INTO attempts VALUES(?,1)', (job,))
+                    elif mutation == 'platform':
+                        con.execute("INSERT INTO platform_attempts VALUES(?,'{}','hash')", (job,))
+                    elif mutation == 'session':
+                        con.execute("INSERT INTO session_members VALUES(?,'session',0)", (job,))
+                    elif mutation == 'slot':
+                        # A reserved installation is already potentially mutating.
+                        con.execute("INSERT INTO cycle_slots(id,cycle_id,iteration,order_id,request,status) VALUES(?,'cycle',1,?,'{}','reserved')", (job, job))
+                    elif mutation == 'history':
+                        self.p.event(con, job, 'running')
+                if mutation == 'trace':
+                    mod.write(self.p.evidence_dir(job) / 'request.json', {'orphan': True})
+                self.p.finish(job, 'blocked', 'Withdrawn before launch')
+                self.assertIn(job, [h['id'] for h in self.p.pipeline_status()['holds']])
+
     def test_queued_subject_survives_tool_update_without_new_order_or_executor(self):
         with patch.object(self.p, "executor", side_effect=AssertionError("Origin must not use executor")):
             order = self.submit()

@@ -350,12 +350,27 @@ Chat consumers analyze only their own returned packet, not other chats' journals
 
 ## Verification
 
+Operator-only tool qualification can pin a different frozen executor for one
+exclusive attempt without changing global host configuration. Read
+[tool-qualification.md](docs/tool-qualification.md) for the separate authority,
+lease, one-start/15-minute budget, shared barriers and retained post-run hold.
+This path never dispatches ordinary queued orders or clears existing holds.
+
 ```text
 python -m unittest discover -s <repository> -p "test_*.py" -v
 ```
 
 Queue/recovery boundaries are tested with isolated temporary files; these checks
 do not claim a new live-game run or headset microphone qualification.
+
+Finishing an untouched queued schema2 order does not require an attempt platform:
+there is no missing-build finding when the only history is initial submission,
+with no attempt/platform/session/installation/notification record or evidence trace.
+Withdrawal prose or a null run/restoration field alone is insufficient. Claimed,
+cycle-bound or ambiguous orders retain the conservative platform/recovery checks.
+This classification never clears an existing hold or rewrites an old packet.
+Existing holds still require the independently owner-reviewed `pipeline-clear`
+procedure in [multi-chat-cycles.md](docs/multi-chat-cycles.md).
 
 ## Development and operator ownership
 

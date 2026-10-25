@@ -30,6 +30,7 @@ from shared_sessions import SharedSessions
 from tooling_retries import ToolingRetries
 from autotest_workflow import AutotestWorkflow
 from post_start_continuations import PostStartContinuations
+from qualification import Qualifications
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 SHA = re.compile(r"[0-9a-f]{64}")
 READ_KINDS = {"state", "player", "refs", "scene", "vm", "world_observer"}
@@ -119,7 +120,7 @@ def owner_evidence(approval, path, require_deadline=True):
     return evidence
 
 
-class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinuations):
+class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinuations, Qualifications):
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.local = self.root / "local/skyrim-polygon"
@@ -163,6 +164,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         self.init_sessions()
         self.init_retries()
         self.init_autotest_workflow()
+        self.init_qualifications()
 
     @contextlib.contextmanager
     def connect(self):
@@ -344,6 +346,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
     def pipeline_status(self):
         with self.connect() as con:
             return {"holds": [dict(r) for r in con.execute("SELECT * FROM pipeline_holds")],
+                    "qualifications": [dict(r) for r in con.execute("SELECT id,status,expires FROM qualifications ORDER BY id")],
                     "slots": [self.slot_view(r) for r in con.execute("SELECT * FROM cycle_slots ORDER BY seq")],
                     "activeOrders": [r["id"] for r in con.execute("SELECT id FROM jobs WHERE status='running'")]}
 
@@ -362,6 +365,11 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             raise ValueError("Exact hold and reviewed shared environment required")
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            qualification = con.execute("SELECT status FROM qualifications WHERE ?='qualification-' || id", (issue,)).fetchone()
+            if qualification and qualification['status'] != 'recorded':
+                raise ValueError("Qualification lease requires proven completion before clearance")
+            if con.execute("SELECT id FROM qualifications WHERE status='running'").fetchone():
+                raise ValueError("Recover qualification before pipeline clearance")
             if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone() or con.execute("SELECT id FROM retry_attempts WHERE status IN ('running','collecting')").fetchone():
                 raise ValueError("Recover active session before pipeline clearance")
             con.execute("DELETE FROM pipeline_holds WHERE id=?", (issue,))
@@ -1201,6 +1209,28 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                 matches.append((path, state))
         return matches
 
+    def unprepared_order(self, job):
+        """Prove an untouched queue entry, rather than trust withdrawal prose."""
+        row = self.get(job)
+        order = json.loads(row["request"])
+        initial = "queued" if row["mode"] == "automatic" else "waiting_player"
+        if (row["status"] != initial or order.get("cycle") or row["packet"]
+                or row["delivery"] or row["mailbox_id"]):
+            return False
+        with self.connect() as con:
+            events = con.execute("SELECT status FROM events WHERE id=? ORDER BY seq", (job,)).fetchall()
+            if [e["status"] for e in events] != [initial]:
+                return False
+            for table, key in (("attempts", "id"), ("platform_attempts", "id"),
+                               ("session_members", "order_id"), ("cycle_slots", "order_id"),
+                               ("notification_results", "id")):
+                if con.execute(f"SELECT 1 FROM {table} WHERE {key}=?", (job,)).fetchone():
+                    return False
+        folder = self.evidence_dir(job)
+        # Native dispatch creates request/config/log evidence before starting a child.
+        # Even an orphan trace is ambiguous; do not waive its platform review.
+        return not folder.exists() or not any(folder.iterdir())
+
     def self_checks(self, job, run):
         findings = []
         folder = self.evidence_dir(job)
@@ -1215,7 +1245,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             if result.get("restored") is not True or result.get("restoreErrors"):
                 findings.append({"component": "skyrim-autotest", "kind": "restoration_unverified", "details": result.get("restoreErrors"), "confirmed": True})
         order = json.loads(self.get(job)["request"])
-        if order.get("schemaVersion") == 2:
+        if order.get("schemaVersion") == 2 and not (run is None and self.unprepared_order(job)):
             try:
                 self.verify_platform(order)
             except (OSError, ValueError) as error:
@@ -1419,6 +1449,9 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             return self.finish(row["id"], "blocked", str(error))
 
     def child_execute(self, job):
+        with self.connect() as con:
+            if con.execute("SELECT id FROM qualifications WHERE status IN ('prepared','running')").fetchone():
+                raise ValueError("Exclusive qualification lease blocks ordinary child dispatch")
         row = self.get(job)
         if row["status"] != "running" or row["mode"] != "automatic":
             raise ValueError("No automatic claim")
@@ -1442,6 +1475,10 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                           restart_idle_mo2=True, order={"id": job, "owner": order["sourceChat"]})
 
     def recover_active(self):
+        with self.connect() as con:
+            qualification = con.execute("SELECT id FROM qualifications WHERE status='running'").fetchone()
+        if qualification:
+            return self.qualification_collect(qualification['id'])
         with self.connect() as con:
             retry = con.execute("SELECT * FROM retry_attempts WHERE status IN ('running','collecting')").fetchone()
         if retry:
@@ -1800,10 +1837,22 @@ def main(argv=None):
     note.add_argument("id")
     note.add_argument("--category", choices=["observation", "player_instruction", "tool_bug", "tool_suspected_bug", "tool_improvement"], required=True)
     note.add_argument("--text", required=True)
+    sub.add_parser("qualification-register", help="Operator-only candidate lease; never launches").add_argument("request", type=Path)
+    for name in ("qualification-show", "qualification-check", "qualification-run", "qualification-collect", "qualification-recover", "_execute-qualification", "_recover-qualification", "_check-qualification"):
+        sub.add_parser(name).add_argument("id")
     args = parser.parse_args(argv)
     try:
         polygon = Polygon(session_root(args.root))
         if args.command == "submit": result = polygon.submit(args.order)
+        elif args.command == "qualification-register": result = polygon.register_qualification(args.request)
+        elif args.command == "qualification-show": result = polygon.qualification_show(args.id)
+        elif args.command == "qualification-check": result = polygon.qualification_check(args.id)
+        elif args.command == "qualification-run": result = polygon.qualification_run(args.id)
+        elif args.command == "qualification-collect": result = polygon.qualification_collect(args.id)
+        elif args.command == "qualification-recover": result = polygon.qualification_recover(args.id)
+        elif args.command == "_execute-qualification": return polygon.child_qualification(args.id)
+        elif args.command == "_recover-qualification": return polygon.child_qualification_recover(args.id)
+        elif args.command == "_check-qualification": return polygon.child_qualification_check(args.id)
         elif args.command == "retry-register": result = polygon.register_retry(args.request)
         elif args.command == "continuation-register": result = polygon.register_continuation(args.request)
         elif args.command == "retry-show": result = polygon.retry_show(args.id)
