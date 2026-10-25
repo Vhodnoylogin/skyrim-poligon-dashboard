@@ -315,6 +315,9 @@ class Qualifications:
             for pin in packet['files']:
                 if m.digest(pin['path']) != pin['sha256']:
                     raise ValueError('Qualification evidence changed')
+            if packet.get('kind') == 'qualification-held-diagnostic':
+                from qualification_diagnostic import verify_archive
+                verify_archive(packet)
             return packet
         folder = self.local / 'qualifications' / identity
         if row['status'] != 'running' or not (folder / 'child-exit.json').is_file():
@@ -395,6 +398,8 @@ class Qualifications:
     def qualification_successful_result(plan, packet):
         """Allow declared tool observations, without converting them into passed assertions."""
         m = api()
+        if packet.get('kind') == 'qualification-held-diagnostic':
+            return False
         projection = packet.get('testResult', {})
         if (projection.get('testingStarted') is not True or projection.get('interruptionObserved')
                 or projection.get('subjectMismatchObserved') or packet.get('executionOutcome') != 'passed'

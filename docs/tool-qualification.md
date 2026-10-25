@@ -87,6 +87,10 @@ test authority expires. Timeout never admits another attempt or clears ownership
 
 ## Collection, uncertainty and recovery
 
+For ended and tracked-restored execution with unresolved exhaustive accounting,
+the separate explicit [held diagnostic recording](qualification-held-diagnostic.md)
+can finish collection without clearing the genuine hold or inventing a count.
+
 `qualification-collect <id>` verifies native done/restored/result and archived
 nonempty copied profile/removal, calculates cumulative real game starts, retains
 raw manifests and projects declared test coverage into a separate packet. Input,
