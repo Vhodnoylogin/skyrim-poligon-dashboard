@@ -1838,6 +1838,10 @@ def main(argv=None):
     note.add_argument("--category", choices=["observation", "player_instruction", "tool_bug", "tool_suspected_bug", "tool_improvement"], required=True)
     note.add_argument("--text", required=True)
     sub.add_parser("qualification-register", help="Operator-only candidate lease; never launches").add_argument("request", type=Path)
+    for name in ('qualification-release', '_release-qualification'):
+        item = sub.add_parser(name)
+        item.add_argument('id')
+        item.add_argument('review', type=Path)
     for name in ("qualification-show", "qualification-check", "qualification-run", "qualification-collect", "qualification-recover", "_execute-qualification", "_recover-qualification", "_check-qualification"):
         sub.add_parser(name).add_argument("id")
     args = parser.parse_args(argv)
@@ -1846,6 +1850,8 @@ def main(argv=None):
         if args.command == "submit": result = polygon.submit(args.order)
         elif args.command == "qualification-register": result = polygon.register_qualification(args.request)
         elif args.command == "qualification-show": result = polygon.qualification_show(args.id)
+        elif args.command == "qualification-release": result = polygon.qualification_release(args.id, args.review)
+        elif args.command == "_release-qualification": result = polygon.child_qualification_release(args.id, args.review)
         elif args.command == "qualification-check": result = polygon.qualification_check(args.id)
         elif args.command == "qualification-run": result = polygon.qualification_run(args.id)
         elif args.command == "qualification-collect": result = polygon.qualification_collect(args.id)

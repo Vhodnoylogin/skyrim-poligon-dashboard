@@ -110,12 +110,51 @@ candidate sessions, uses the native mutex, never launches, and then recollects.
 while a qualification is running. No generic timeout takeover is provided for an
 unknown worker or unproven admission with no native state; those require review.
 
-The qualification lease persists after recorded completion. It cannot be cleared
-while prepared/running. Once recorded, releasing it is a SEPARATE owner-reviewed
-pipeline clearance: clearing it may permit previously released queues to run.
-Do not clear it as part of old-hold clearance or automatic qualification cleanup.
-Neither failure nor successful collection refreshes the one-start allowance;
-`qualification-run` on the same id is refused thereafter.
+The qualification lease persists after recorded completion until the operator
+explicitly finishes this planned reservation. It cannot be cleared while
+prepared/running. A successful test needs no second human authorization solely
+to finish its own ordinary reservation: use
+`qualification-release <id> <technical-review.json>`, never automatic cleanup.
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "tool-qualification-release",
+  "qualificationId": "vr-candidate-qualification-1",
+  "packetSha256": "ACTUAL-REGISTERED-FINAL-PACKET-SHA256",
+  "verifiedBy": "Actual operator identity",
+  "summary": "Technical review of the exact successful packet and collection",
+  "successfulResultReviewed": true,
+  "collectionReviewed": true,
+  "nativeCompletionReviewed": true,
+  "restorationReviewed": true,
+  "archiveReviewed": true
+}
+```
+
+The review is operator technical evidence, not fabricated human approval. The
+release command requires recorded status, successful factual testing and all
+required checks, exactly one actual game start, no collection findings, normal
+successful child exit, exact dead worker/owned identities, no current game/loader,
+verified restoration, unchanged collected profile archive/removal, and final
+packet/evidence hashes. Older packets without pinned archive inventory remain
+held for review; no retrospective evidence is fabricated. Native mutex and SQLite
+write transaction serialize the final checks and removal of ONLY this reservation.
+
+It refuses any other hold or active owner/installation, another pending
+qualification, previously released ordinary waiting jobs, cycle-bound waiting
+jobs, queued retries/shared sessions, and unfinished native sessions in either
+candidate or configured host runtime. It calls no next/run/recovery, releases no
+batch, modifies no foreign hold and activates no provider. Unreleased ordinary
+orders stay unreleased. Exact repeat reviews are idempotent; altered reviews are
+refused. Successful release marks this reservation released and retains the
+packet, accounting and immutable review. It never refreshes the start allowance.
+
+This normal finish path does NOT apply to the old stale hold or any genuine or
+uncertain recovery hold: those retain their existing independent owner-reviewed
+clearance protocol. Failed, incomplete, timed-out or ambiguous qualifications
+also stay held. Do not clear the qualification reservation together with the old
+hold. `qualification-run` on the same id remains refused after completion/release.
 
 Artifacts: `local/skyrim-polygon/qualifications/<id>/`; plan is also immutable in
 the qualifications SQLite table. `qualification-show` and `pipeline-status` expose

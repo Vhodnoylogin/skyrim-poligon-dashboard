@@ -35,6 +35,8 @@ class Qualifications:
             con.execute('''CREATE TABLE IF NOT EXISTS qualifications (
                 id TEXT PRIMARY KEY, request TEXT NOT NULL, status TEXT NOT NULL,
                 expires REAL, packet TEXT)''')
+            con.execute('''CREATE TABLE IF NOT EXISTS qualification_releases (
+                id TEXT PRIMARY KEY, review TEXT NOT NULL)''')
 
     def qualification_show(self, identity):
         with self.connect() as con:
@@ -149,7 +151,7 @@ class Qualifications:
                 if old['request'] != canonical:
                     raise ValueError('Qualification identity is immutable')
                 return {'id': request['id'], 'duplicate': True}
-            if (self.qualification_busy(con) or con.execute("SELECT id FROM qualifications WHERE status != 'recorded'").fetchone()
+            if (self.qualification_busy(con) or con.execute("SELECT id FROM qualifications WHERE status NOT IN ('recorded','released')").fetchone()
                     or con.execute('SELECT id FROM jobs WHERE id=?', (order['id'],)).fetchone()):
                 raise ValueError('Recover existing owner or qualification first; do not reuse mod orders')
             con.execute("INSERT INTO qualifications VALUES(?,?,'prepared',NULL,NULL)", (request['id'], canonical))
@@ -171,9 +173,9 @@ class Qualifications:
         plan = self.qualification_verify(row)
         with self.connect() as con:
             con.execute('BEGIN IMMEDIATE')
-            self.qualification_guard(con, identity)
             if con.execute('SELECT status FROM qualifications WHERE id=?', (identity,)).fetchone()[0] != 'prepared':
                 raise ValueError('Qualification may be dispatched only once')
+            self.qualification_guard(con, identity)
             expires = min(time.time() + 900, plan['deadlineUtc'])
             con.execute("UPDATE qualifications SET status='running',expires=? WHERE id=?", (expires, identity))
         folder = self.local / 'qualifications' / identity
@@ -364,6 +366,9 @@ class Qualifications:
                 if file.is_file() and file.suffix in ('.json', '.jsonl', '.log') and file.name != 'packet.json':
                     packet['files'].append({'path': str(file), 'sha256': m.digest(file)})
         packet['files'].extend(m.raw_evidence_pins(state_path.parent))
+        packet['profileArchivePins'] = [{'path': str(p), 'sha256': m.digest(p)}
+                                        for p in sorted(archive.rglob('*')) if p.is_file()]
+        packet['files'].extend(packet['profileArchivePins'])
         packet['testResult'] = self.test_projection(plan['orderData'], packet)
         packet['collectionFindings'] = self.collection_findings(state_path.parent)
         # This is evidence for operator/tool-chat review, never automatic platform acceptance.
@@ -373,3 +378,114 @@ class Qualifications:
             con.execute("UPDATE qualifications SET status='recorded',packet=? WHERE id=?", (json.dumps({'path': str(folder / 'packet.json'), 'sha256': m.digest(folder / 'packet.json')}), identity))
             self.event(con, identity, 'qualification_recorded', 'Lease remains held; no old queue dispatch')
         return packet
+
+    def qualification_release(self, identity, review_path):
+        """Explicitly finish a successful planned reservation, never a recovery hold."""
+        m = api()
+        review_path = Path(review_path).resolve()
+        child = subprocess.run([sys.executable, str(m.HERE / 'polygon.py'), '--root', str(self.root),
+                                '_release-qualification', identity, str(review_path)],
+                               capture_output=True, text=True, timeout=30,
+                               env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+        if child.returncode:
+            raise ValueError('Qualification reservation retained: ' + child.stdout + child.stderr)
+        return json.loads(child.stdout)
+
+    def child_qualification_release(self, identity, review_path):
+        m = api()
+        review_path = Path(review_path).resolve()
+        review = m.read(review_path)
+        if (review.get('schemaVersion') != 1 or review.get('kind') != 'tool-qualification-release'
+                or review.get('qualificationId') != identity or
+                any(review.get(key) is not True for key in ('successfulResultReviewed', 'collectionReviewed',
+                    'nativeCompletionReviewed', 'restorationReviewed', 'archiveReviewed'))):
+            raise ValueError('Exact qualification and explicit technical completion review required')
+        for key in ('verifiedBy', 'summary'):
+            m.required_string(review, key)
+        canonical = json.dumps({'review': review, 'path': str(review_path), 'sha256': m.digest(review_path)}, sort_keys=True)
+        row = self.qualification_show(identity)
+        packet = self.qualification_collect(identity)  # recheck final packet AND every retained evidence hash
+        if not row['packet'] or review.get('packetSha256') != json.loads(row['packet'])['sha256']:
+            raise ValueError('Review must bind the exact registered final packet hash')
+        with self.connect() as con:
+            prior = con.execute('SELECT review FROM qualification_releases WHERE id=?', (identity,)).fetchone()
+        if row['status'] == 'released':
+            if not prior or prior['review'] != canonical:
+                raise ValueError('Completed reservation review is immutable')
+            return {'id': identity, 'status': 'released', 'duplicate': True}
+        if (row['status'] != 'recorded' or packet.get('executionOutcome') != 'passed'
+                or packet.get('testResult', {}).get('outcome') != 'tested_successfully'
+                or packet.get('testResult', {}).get('testingStarted') is not True
+                or packet.get('actualGameStarts') != 1 or packet.get('restored') is not True
+                or packet.get('collectionFinished') is not True or packet.get('collectionFindings')):
+            raise ValueError('Only factually successful fully collected/restored qualification can finish normally')
+        plan = self.qualification_verify(row, authority=False)  # completion need not extend expired launch authority
+        folder = self.local / 'qualifications' / identity
+        exit_record = m.read(folder / 'child-exit.json')
+        if type(exit_record.get('returncode')) is not int or exit_record['returncode'] != 0 or exit_record.get('timeout'):
+            raise ValueError('Exact successful child exit required; timeout/recovery remains held')
+        worker = m.read(folder / 'worker.json').get('identity')
+        def checked_identity(value):
+            if (not isinstance(value, dict) or type(value.get('pid')) is not int or value['pid'] <= 0
+                    or type(value.get('birth')) is not int or value['birth'] <= 0 or not value.get('path')):
+                raise ValueError('Exact native identity required')
+            return value
+        checked_identity(worker)
+        run = Path(packet['runDirectory'])
+        state, result = m.read(run / 'state.json'), m.read(run / 'result.json')
+        if (state.get('runner') != worker or state.get('order', {}).get('id') != 'qualification-' + identity
+                or state.get('done') is not True or state.get('restored') is not True or state.get('restoreErrors')
+                or result.get('restored') is not True or result.get('restoreErrors') or result.get('result') != 'passed'
+                or self.native_game_starts(state) != 1):
+            raise ValueError('Native worker/run/result ownership or restoration differs')
+        archive = (run / 'test-profile').resolve()
+        current_archive = [{'path': str(p), 'sha256': m.digest(p)}
+                           for p in sorted(archive.rglob('*')) if p.is_file()]
+        if (not packet.get('profileArchivePins') or current_archive != packet['profileArchivePins']
+                or Path(state.get('profileArchive', '')).resolve() != archive
+                or not state.get('testProfile') or Path(state['testProfile']).exists()):
+            raise ValueError('Collected profile archive/removal differs')
+        sys.path.insert(0, plan['executor'])
+        from skyrim_autotest import runner
+        if Path(runner.__file__).resolve() != Path(plan['executor']) / 'skyrim_autotest/runner.py':
+            raise ValueError('Wrong candidate native observer')
+        # Hold the same native mutex AND SQLite write transaction while observing
+        # and removing only this reservation. No launch, recovery or next call.
+        with runner.native.SessionMutex(), self.connect() as con:
+            con.execute('BEGIN IMMEDIATE')
+            if con.execute('SELECT status FROM qualifications WHERE id=?', (identity,)).fetchone()[0] != 'recorded':
+                raise ValueError('Qualification ownership changed')
+            self.qualification_guard(con, identity)
+            if con.execute("SELECT id FROM qualifications WHERE id != ? AND status IN ('prepared','running')", (identity,)).fetchone():
+                raise ValueError('Another qualification reservation exists')
+            if (con.execute("SELECT j.id FROM jobs j JOIN released_orders r ON r.id=j.id WHERE j.status IN ('queued','running','waiting_player','session_waiting')").fetchone()
+                    or con.execute("SELECT id FROM jobs WHERE status IN ('queued','session_waiting') AND json_extract(request,'$.cycle') IS NOT NULL").fetchone()
+                    or con.execute("SELECT id FROM retry_attempts WHERE status='queued'").fetchone()
+                    or con.execute("SELECT id FROM game_sessions WHERE status='queued'").fetchone()):
+                raise ValueError('Previously released ordinary work would become runnable; retain reservation')
+            identities = [worker] + [checked_identity(p['identity']) for p in state.get('owned', [])]
+            if any(runner.native.alive(ident) for ident in identities):
+                raise ValueError('Exact worker/owned native process is still alive')
+            processes = runner.native.processes()
+            if not isinstance(processes, list) or not processes:
+                raise ValueError('Native process inventory is unavailable')
+            if any(any(p.get('pid') == ident['pid'] for p in processes)
+                   and runner.native.identity(ident['pid']) is None for ident in identities):
+                raise ValueError('Listed worker/owned PID identity is unknown; retain reservation')
+            if any(p['name'].lower() in runner.GAME_NAMES for p in processes):
+                raise ValueError('Current game/loader blocks reservation completion')
+            runtimes = {Path(plan['configuration']['runtime'])}
+            if self.host().get('runnerConfig'):
+                runtimes.add(Path(m.read(self.host()['runnerConfig'])['runtime']))
+            for runtime in runtimes:
+                for state_file in (runtime / 'runs').glob('*/state.json'):
+                    if m.read(state_file).get('done') is not True:
+                        raise ValueError('Unfinished native session retains reservation')
+            self.qualification_collect(identity)
+            if m.digest(review_path) != json.loads(canonical)['sha256']:
+                raise ValueError('Technical review changed')
+            con.execute('DELETE FROM pipeline_holds WHERE id=?', ('qualification-' + identity,))
+            con.execute("UPDATE qualifications SET status='released' WHERE id=?", (identity,))
+            con.execute('INSERT INTO qualification_releases VALUES(?,?)', (identity, canonical))
+            self.event(con, identity, 'qualification_released', canonical)
+        return {'id': identity, 'status': 'released', 'globalProviderQualified': False}

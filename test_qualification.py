@@ -1,5 +1,6 @@
 """Offline candidate leases; fake native evidence never launches an application."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,9 +12,16 @@ import polygon as m
 
 FAKE_RUNNER = '''
 import json, os
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-native=SimpleNamespace(processes=lambda: [], identity=lambda pid: {'pid':pid,'birth':1,'path':'offline-worker'}, alive=lambda ident:False)
+def processes():
+ rows=[{'name':'python.exe','pid':os.getpid()}]
+ if os.environ.get('OFFLINE_FOREIGN_GAME'): rows.append({'name':'SkyrimVR.exe','pid':100})
+ if os.environ.get('OFFLINE_UNKNOWN_PID'): rows.append({'name':'python.exe','pid':int(os.environ['OFFLINE_UNKNOWN_PID'])})
+ return rows
+native=SimpleNamespace(processes=processes, identity=lambda pid: {'pid':pid,'birth':1,'path':'offline-worker'} if pid==os.getpid() else None, alive=lambda ident:bool(os.environ.get('OFFLINE_NATIVE_ALIVE')), SessionMutex=nullcontext)
+GAME_NAMES={'skyrimvr.exe','skyrimse.exe','sksevr_loader.exe','skse64_loader.exe'}
 P=SimpleNamespace()
 def configure(config):
  global C
@@ -31,11 +39,11 @@ def run(profile,scenario_file,**kwargs):
  archive.mkdir()
  (archive/'settings.ini').write_text('preserved')
  game={'pid':42,'birth':43,'path':'offline-game'}
- state={'order':kwargs['order'],'done':True,'restored':True,'restoreErrors':[],
+ state={'id':'offline','runner':native.identity(os.getpid()),'order':kwargs['order'],'done':True,'restored':True,'restoreErrors':[],
   'profileArchive':str(archive),'testProfile':str(run/'removed-profile'),
   'owned':[{'role':'game','identity':game}],'game':game,'ownedGameRestartCount':0}
  (run/'state.json').write_text(json.dumps(state))
- (run/'result.json').write_text(json.dumps({'restored':True,'restoreErrors':[],'result':'passed'}))
+ (run/'result.json').write_text(json.dumps({'id':'offline','restored':True,'restoreErrors':[],'result':'passed','checks':[{'name':'tool-check','result':'failed' if scenario.get('failCheck') else 'passed'}]}))
  return 0
 '''
 
@@ -230,6 +238,97 @@ class QualificationTests(unittest.TestCase):
             con.execute("UPDATE qualifications SET status='running',packet=NULL")
         self.assertIn('restoration unproven', self.p.qualification_collect('candidate-one')['reason'])
         self.assertIsNone(self.p.claim())
+
+    def release_fixture(self):
+        self.register()
+        packet = self.p.qualification_run('candidate-one')
+        self.review_path = self.root / 'technical-review.json'
+        self.review = {'schemaVersion': 1, 'kind': 'tool-qualification-release',
+                       'qualificationId': 'candidate-one', 'packetSha256': json.loads(self.p.qualification_show('candidate-one')['packet'])['sha256'],
+                       'verifiedBy': 'offline-operator', 'summary': 'Reviewed exact successful native packet',
+                       'successfulResultReviewed': True, 'collectionReviewed': True,
+                       'nativeCompletionReviewed': True, 'restorationReviewed': True, 'archiveReviewed': True}
+        m.write(self.review_path, self.review)
+        return packet
+
+    def release(self):
+        return self.p.qualification_release('candidate-one', self.review_path)
+
+    def test_explicit_success_release_needs_no_new_owner_clearance_or_launch(self):
+        self.release_fixture()
+        with self.p.connect() as con:
+            con.execute("INSERT INTO jobs(id,mode,subject,origin,status,submitted,request) VALUES('old','automatic','old','other','queued',1,'{}')")
+        released = self.release()
+        self.assertEqual(released['status'], 'released')
+        self.assertFalse(released['globalProviderQualified'])
+        self.assertFalse(self.p.pipeline_status()['holds'])
+        self.assertIsNone(self.p.claim())  # unreleased ordinary work remains unreleased
+        self.assertEqual(self.p.get('old')['status'], 'queued')
+        self.assertTrue(self.release()['duplicate'])
+        self.assertEqual(self.p.qualification_show('candidate-one')['status'], 'released')
+        with self.assertRaisesRegex(ValueError, 'only once'):
+            self.p.qualification_run('candidate-one')
+
+    def test_release_refuses_previously_released_ordinary_work_and_preserves_it(self):
+        self.release_fixture()
+        with self.p.connect() as con:
+            con.execute("INSERT INTO jobs(id,mode,subject,origin,status,submitted,request) VALUES('old','automatic','old','other','queued',1,'{}')")
+            con.execute("INSERT INTO released_orders VALUES('old','old-release')")
+        with self.assertRaisesRegex(ValueError, 'Previously released ordinary work'):
+            self.release()
+        self.assertEqual(self.p.qualification_show('candidate-one')['status'], 'recorded')
+        self.assertIsNone(self.p.claim())
+
+    def test_release_refuses_other_holds_without_removing_either(self):
+        self.release_fixture()
+        self.p.hold_pipeline('real-recovery', 'Uncertain restoration elsewhere')
+        with self.assertRaisesRegex(ValueError, 'no other holds'):
+            self.release()
+        self.assertEqual(len(self.p.pipeline_status()['holds']), 2)
+
+    def test_release_refuses_live_exact_worker_or_foreign_game(self):
+        self.release_fixture()
+        for flag, message in [('OFFLINE_NATIVE_ALIVE', 'still alive'), ('OFFLINE_FOREIGN_GAME', 'Current game/loader')]:
+            with self.subTest(flag=flag), patch.dict(os.environ, {flag: '1'}):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.release()
+        self.assertEqual(len(self.p.pipeline_status()['holds']), 1)
+
+    def test_release_refuses_listed_worker_with_unknown_identity(self):
+        self.release_fixture()
+        worker = m.read(self.p.local/'qualifications/candidate-one/worker.json')['identity']
+        with patch.dict(os.environ, {'OFFLINE_UNKNOWN_PID': str(worker['pid'])}):
+            with self.assertRaisesRegex(ValueError, 'identity is unknown'):
+                self.release()
+
+    def test_release_refuses_changed_archive_or_packet_hash(self):
+        packet = self.release_fixture()
+        self.review['packetSha256'] = '0'*64
+        m.write(self.review_path, self.review)
+        with self.assertRaisesRegex(ValueError, 'exact registered final packet hash'):
+            self.release()
+        self.review['packetSha256'] = json.loads(self.p.qualification_show('candidate-one')['packet'])['sha256']
+        m.write(self.review_path, self.review)
+        (Path(packet['runDirectory'])/'test-profile/new-save.ess').write_text('unreviewed')
+        with self.assertRaisesRegex(ValueError, 'archive/removal differs'):
+            self.release()
+
+    def test_release_refuses_unsuccessful_checks_and_incomplete_manual_review(self):
+        self.scenario['failCheck'] = True
+        m.write(self.root/'scenario.json', self.scenario)
+        self.release_fixture()
+        with self.assertRaisesRegex(ValueError, 'factually successful'):
+            self.release()
+        self.review['collectionReviewed'] = False
+        m.write(self.review_path, self.review)
+        with self.assertRaisesRegex(ValueError, 'technical completion review'):
+            self.release()
+
+    def test_release_refuses_other_unfinished_native_state(self):
+        self.release_fixture()
+        m.write(self.root/'runtime/runs/foreign/state.json', {'done': False})
+        with self.assertRaisesRegex(ValueError, 'Unfinished native session'):
+            self.release()
 
 
 if __name__ == '__main__':

@@ -355,6 +355,9 @@ exclusive attempt without changing global host configuration. Read
 [tool-qualification.md](docs/tool-qualification.md) for the separate authority,
 lease, one-start/15-minute budget, shared barriers and retained post-run hold.
 This path never dispatches ordinary queued orders or clears existing holds.
+After verified success the operator can explicitly finish only its own planned
+reservation with qualification-release and a hash-bound technical review; foreign
+holds, uncertainty or previously released waiting work prevent this finish.
 
 ```text
 python -m unittest discover -s <repository> -p "test_*.py" -v
