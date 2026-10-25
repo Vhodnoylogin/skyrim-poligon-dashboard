@@ -1842,6 +1842,10 @@ def main(argv=None):
         item = sub.add_parser(name)
         item.add_argument('id')
         item.add_argument('review', type=Path)
+    for name in ('qualification-reconcile-pre-native', 'qualification-finish-pre-native'):
+        item = sub.add_parser(name, help='Explicit reviewed missing-loader pre-native reconciliation only')
+        item.add_argument('id')
+        item.add_argument('review', type=Path)
     for name in ("qualification-show", "qualification-check", "qualification-run", "qualification-collect", "qualification-recover", "_execute-qualification", "_recover-qualification", "_check-qualification"):
         sub.add_parser(name).add_argument("id")
     args = parser.parse_args(argv)
@@ -1850,6 +1854,9 @@ def main(argv=None):
         if args.command == "submit": result = polygon.submit(args.order)
         elif args.command == "qualification-register": result = polygon.register_qualification(args.request)
         elif args.command == "qualification-show": result = polygon.qualification_show(args.id)
+        elif args.command in ('qualification-reconcile-pre-native', 'qualification-finish-pre-native'):
+            from qualification_pre_native import reconcile, finish
+            result = (reconcile if args.command == 'qualification-reconcile-pre-native' else finish)(polygon, args.id, args.review)
         elif args.command == "qualification-release": result = polygon.qualification_release(args.id, args.review)
         elif args.command == "_release-qualification": result = polygon.child_qualification_release(args.id, args.review)
         elif args.command == "qualification-check": result = polygon.qualification_check(args.id)

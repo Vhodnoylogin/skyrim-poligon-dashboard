@@ -355,6 +355,10 @@ exclusive attempt without changing global host configuration. Read
 [tool-qualification.md](docs/tool-qualification.md) for the separate authority,
 lease, one-start/15-minute budget, shared barriers and retained post-run hold.
 This path never dispatches ordinary queued orders or clears existing holds.
+For the exact reviewed missing-loader refusal before native state/setup, the
+separate [pre-native reconciliation contract](docs/pre-native-qualification.md)
+records independently proven zero starts and explicitly finishes only its own
+routine reservation. Missing protected-state/source/accounting proof stays held.
 After verified success the operator can explicitly finish only its own planned
 reservation with qualification-release and a hash-bound technical review; foreign
 holds, uncertainty or previously released waiting work prevent this finish.

@@ -106,6 +106,12 @@ missing child completion or multiple real starts retain the running barrier.
 only after the exact worker has ended (recorded child exit, or exact native worker
 identity verified dead). It refuses live/unknown workers and foreign unfinished
 candidate sessions, uses the native mutex, never launches, and then recollects.
+The specific admitted missing-loader refusal with no native state has a separate
+explicit [pre-native reconciliation and finish](pre-native-qualification.md).
+It requires original source exports, reviewed accounting/control flow, either a
+real protected baseline or exact audited write-free source-prefix proof, and
+fresh ownership/safety checks. Current inventory is never a historical baseline. Missing proof
+retains uncertainty; this is not a general failed-qualification release.
 `recover-active` points to qualification collection rather than ordinary recovery
 while a qualification is running. No generic timeout takeover is provided for an
 unknown worker or unproven admission with no native state; those require review.
