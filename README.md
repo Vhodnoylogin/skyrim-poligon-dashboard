@@ -40,6 +40,9 @@ manual game. Test requests remain data; they do not redefine Polygon's role.
 
 ## Prepare a mod for testing
 
+For a one-shot installation outside a full cycle, use the existing-command
+[standard preparation barrier](docs/standard-preparation.md).
+
 The originating chat owns test design and mod conclusions. A ready order has:
 
 1. A built mod and exact **installed** test inputs, SHA256 pins, dependencies and

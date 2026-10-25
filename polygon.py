@@ -302,7 +302,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
     def environment_idle(self):
         self.executor()
         from skyrim_autotest import native
-        names = {"skyrimvr.exe", "sksevr_loader.exe", "vrserver.exe", "vrmonitor.exe", "vrcompositor.exe",
+        names = {"skyrimse.exe", "skse64_loader.exe", "skyrimvr.exe", "sksevr_loader.exe", "vrserver.exe", "vrmonitor.exe", "vrcompositor.exe",
                  "vrstartup.exe", "vrdashboard.exe", "vrwebhelper.exe", "vrprismhost.exe"}
         return not any(p["name"].lower() in names for p in native.processes())
 
