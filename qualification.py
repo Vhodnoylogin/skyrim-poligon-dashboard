@@ -391,6 +391,32 @@ class Qualifications:
             raise ValueError('Qualification reservation retained: ' + child.stdout + child.stderr)
         return json.loads(child.stdout)
 
+    @staticmethod
+    def qualification_successful_result(plan, packet):
+        """Allow declared tool observations, without converting them into passed assertions."""
+        m = api()
+        projection = packet.get('testResult', {})
+        if (projection.get('testingStarted') is not True or projection.get('interruptionObserved')
+                or projection.get('subjectMismatchObserved') or packet.get('executionOutcome') != 'passed'
+                or any(c['status'] != 'passed' for c in projection.get('auxiliaryCoverage', {}).get('checks', []))):
+            return False
+        declared = {c['name']: c['role'] for c in plan['orderData']['testing']['checks']}
+        checks = projection.get('coverage', {}).get('checks', [])
+        if len(checks) != len(declared) or {c['name'] for c in checks} != set(declared):
+            return False
+        observations = {s['name'] for s in plan['scenario']['steps']
+                        if s.get('observe') is True and not s.get('assert')}
+        actual = m.read(Path(packet['runDirectory']) / 'result.json').get('checks', [])
+        for check in checks:
+            if check['status'] == 'passed':
+                continue
+            matches = [c for c in actual if c.get('name') == check['name']]
+            if (check['status'] != 'unavailable' or declared[check['name']] != 'tooling'
+                    or check['name'] not in observations or len(matches) != 1
+                    or matches[0].get('result') != 'observed' or matches[0].get('provenance')):
+                return False
+        return True
+
     def child_qualification_release(self, identity, review_path):
         m = api()
         review_path = Path(review_path).resolve()
@@ -413,13 +439,11 @@ class Qualifications:
             if not prior or prior['review'] != canonical:
                 raise ValueError('Completed reservation review is immutable')
             return {'id': identity, 'status': 'released', 'duplicate': True}
-        if (row['status'] != 'recorded' or packet.get('executionOutcome') != 'passed'
-                or packet.get('testResult', {}).get('outcome') != 'tested_successfully'
-                or packet.get('testResult', {}).get('testingStarted') is not True
+        plan = self.qualification_verify(row, authority=False)  # completion need not extend expired launch authority
+        if (row['status'] != 'recorded' or not self.qualification_successful_result(plan, packet)
                 or packet.get('actualGameStarts') != 1 or packet.get('restored') is not True
                 or packet.get('collectionFinished') is not True or packet.get('collectionFindings')):
             raise ValueError('Only factually successful fully collected/restored qualification can finish normally')
-        plan = self.qualification_verify(row, authority=False)  # completion need not extend expired launch authority
         folder = self.local / 'qualifications' / identity
         exit_record = m.read(folder / 'child-exit.json')
         if type(exit_record.get('returncode')) is not int or exit_record['returncode'] != 0 or exit_record.get('timeout'):

@@ -43,7 +43,9 @@ def run(profile,scenario_file,**kwargs):
   'profileArchive':str(archive),'testProfile':str(run/'removed-profile'),
   'owned':[{'role':'game','identity':game}],'game':game,'ownedGameRestartCount':0}
  (run/'state.json').write_text(json.dumps(state))
- (run/'result.json').write_text(json.dumps({'id':'offline','restored':True,'restoreErrors':[],'result':'passed','checks':[{'name':'tool-check','result':'failed' if scenario.get('failCheck') else 'passed'}]}))
+ checks=[{'name':'tool-check','result':'failed' if scenario.get('failCheck') else 'passed'}]
+ checks.extend({'name':step['name'],'result':'observed'} for step in scenario['steps'] if step.get('observe'))
+ (run/'result.json').write_text(json.dumps({'id':'offline','restored':True,'restoreErrors':[],'result':'passed','checks':checks}))
  return 0
 '''
 
@@ -328,6 +330,25 @@ class QualificationTests(unittest.TestCase):
         self.release_fixture()
         m.write(self.root/'runtime/runs/foreign/state.json', {'done': False})
         with self.assertRaisesRegex(ValueError, 'Unfinished native session'):
+            self.release()
+
+    def test_declared_tool_observation_can_finish_without_relabeling_coverage(self):
+        self.scenario['steps'].append({'name': 'tool-discovery', 'tool': 'inspect', 'args': {'kind': 'state'}, 'observe': True})
+        self.order['testing']['checks'].append({'name': 'tool-discovery', 'role': 'tooling'})
+        m.write(self.root/'scenario.json', self.scenario)
+        m.write(self.root/'order.json', self.order)
+        packet = self.release_fixture()
+        self.assertEqual(packet['testResult']['outcome'], 'incomplete')
+        self.assertEqual(self.release()['status'], 'released')
+        self.assertEqual(self.p.qualification_collect('candidate-one'), packet)
+
+    def test_observation_never_satisfies_a_subject_assertion_for_release(self):
+        self.scenario['steps'].append({'name': 'subject-observation', 'tool': 'inspect', 'args': {'kind': 'state'}, 'observe': True})
+        self.order['testing']['checks'].append({'name': 'subject-observation', 'role': 'subject'})
+        m.write(self.root/'scenario.json', self.scenario)
+        m.write(self.root/'order.json', self.order)
+        self.release_fixture()
+        with self.assertRaisesRegex(ValueError, 'factually successful'):
             self.release()
 
 

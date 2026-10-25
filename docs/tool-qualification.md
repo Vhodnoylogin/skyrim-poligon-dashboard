@@ -134,12 +134,19 @@ to finish its own ordinary reservation: use
 
 The review is operator technical evidence, not fabricated human approval. The
 release command requires recorded status, successful factual testing and all
-required checks, exactly one actual game start, no collection findings, normal
+required assertions, exactly one actual game start, no collection findings, normal
 successful child exit, exact dead worker/owned identities, no current game/loader,
 verified restoration, unchanged collected profile archive/removal, and final
 packet/evidence hashes. Older packets without pinned archive inventory remain
 held for review; no retrospective evidence is fabricated. Native mutex and SQLite
 write transaction serialize the final checks and removal of ONLY this reservation.
+
+A declared non-asserting `observe:true` step with a required `tooling` role may
+be reviewed as its actual native `observed` result for reservation completion.
+For example, capture-provider discovery does not assert visual capture quality.
+Such observations never satisfy subject/fixture assertions or missing/unknown
+checks. Their original incomplete/unavailable coverage projection stays unchanged
+in the packet; normal completion does not turn them into passed tests.
 
 It refuses any other hold or active owner/installation, another pending
 qualification, previously released ordinary waiting jobs, cycle-bound waiting
