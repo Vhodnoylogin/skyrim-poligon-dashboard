@@ -77,6 +77,13 @@ active, cycle, retry or shared work retains the barrier. There is no interval wh
 the old global dispatcher can claim the subject. Repeating the same review cannot
 launch again. A crash after claim leaves a running recovery barrier, not a retry.
 
+Launch authority is rechecked through the SAME SQLite connection after the exact
+own hold is removed inside the still-uncommitted transaction. Other readers still
+see the hold and queued target until commit. A refusal rolls back both changes.
+There is no ignore-holds option: the ordinary hold, slot, release, owner hash,
+deadline and profile checks remain intact. This avoids a second connection seeing
+the pre-transfer hold and incorrectly rejecting its own reviewed admission.
+
 The normal same-root child pipeline freezes/rechecks the selected executor,
 manifest, qualification, source files, owner evidence, review and compiled scenario.
 A fresh subprocess validates the selected executor to avoid cached global VR modules.

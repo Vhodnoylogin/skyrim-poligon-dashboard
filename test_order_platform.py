@@ -111,7 +111,7 @@ class OperatorBindingTests(unittest.TestCase):
         self.native=SimpleNamespace(SessionMutex=nullcontext,processes=lambda:[{'pid':999,'name':'explorer.exe'}],alive=lambda x:False,identity=lambda x:None)
         changes=[patch.object(self.p,'qualification_collect',return_value=self.packet),patch.object(self.p,'qualification_verify',return_value=self.qplan),
                  patch.object(self.p,'qualification_successful_result',return_value=True),patch.object(self.p,'native_game_starts',return_value=1),
-                 patch.object(self.p,'check_launch_authorization'),patch.object(self.p,'execute_claimed',return_value={'fixture':'admitted, no native launch'}),
+                 patch.object(self.p,'execute_claimed',return_value={'fixture':'admitted, no native launch'}),
                  patch.object(b,'activate',return_value=SimpleNamespace(native=self.native))]
         for item in changes:item.start();self.addCleanup(item.stop)
 
@@ -124,6 +124,40 @@ class OperatorBindingTests(unittest.TestCase):
         self.assertEqual((self.p.local/'config.json').read_bytes(),self.hostbytes)
         self.assertFalse(b.execute(self.p,self.reviewfile)['rerun'])
         self.p.execute_claimed.assert_called_once()
+
+    def test_authority_uses_atomic_view_while_other_readers_still_see_hold_and_queued_subject(self):
+        self.admission_fixture();authorize=self.p.check_launch_authorization
+        observed=[]
+        def review(order,*,connection=None):
+            self.assertIsNotNone(connection)
+            with self.p.connect() as other:
+                observed.append(([x['id']for x in other.execute('SELECT id FROM pipeline_holds')],
+                                 other.execute('SELECT status FROM jobs WHERE id=?',(order['id'],)).fetchone()[0]))
+            return authorize(order,connection=connection)
+        with patch.object(self.p,'check_launch_authorization',side_effect=review):
+            b.execute(self.p,self.reviewfile)
+        self.assertEqual(observed,[([self.hold],'queued')])
+        self.assertEqual(self.p.get(self.orderdata['id'])['status'],'running')
+
+    def test_expired_actual_release_rolls_back_hold_transfer_and_claim(self):
+        self.admission_fixture()
+        with self.p.connect() as con:
+            con.execute('UPDATE releases SET authorization=? WHERE id=?',
+                        (json.dumps({'ownerAuthorization':self.auth,'deadlineUtc':0}),'release'))
+        with self.assertRaisesRegex(ValueError,'expired or provenance changed'):
+            b.execute(self.p,self.reviewfile)
+        self.assertEqual(self.p.get(self.orderdata['id'])['status'],'queued')
+        self.assertEqual([x['id']for x in self.p.pipeline_status()['holds']],[self.hold])
+        self.assertIsNone(b.admission(self.p,self.orderdata['id']))
+        self.p.execute_claimed.assert_not_called()
+
+    def test_foreign_hold_never_receives_own_completed_hold_exception(self):
+        self.admission_fixture();self.p.hold_pipeline('foreign-owner','Unsettled foreign environment')
+        with self.assertRaisesRegex(ValueError,'Exact sole completed tool hold'):
+            b.execute(self.p,self.reviewfile)
+        self.assertEqual({x['id']for x in self.p.pipeline_status()['holds']},{self.hold,'foreign-owner'})
+        self.assertEqual(self.p.get(self.orderdata['id'])['status'],'queued')
+        self.p.execute_claimed.assert_not_called()
 
     def test_admission_refuses_other_released_work_or_live_game(self):
         self.admission_fixture();self.native.processes=lambda:[{'pid':999,'name':'SkyrimSE.exe'}]

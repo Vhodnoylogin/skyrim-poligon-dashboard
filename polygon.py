@@ -539,25 +539,28 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         else:
             raise ValueError("Decision changeKind must be mod or scenario")
 
-    def check_launch_authorization(self, order):
-        with self.connect() as con:
-            if con.execute("SELECT id FROM pipeline_holds").fetchone():
-                raise ValueError("Shared tooling/recovery pipeline is held for owner review")
-            slot = con.execute("SELECT * FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone()
-            if slot and (slot["status"] == "blocked" or slot["order_id"] != order["id"]):
-                raise ValueError("Another installation/run slot owns the shared environment")
-            if order.get("cycle") is not None:
-                self.validate_cycle(con, order)
-            else:
-                row = con.execute("SELECT authorization FROM releases JOIN released_orders ON releases.id=release_id WHERE released_orders.id=?", (order["id"],)).fetchone()
-                if not row:
-                    raise ValueError("Standard order awaits the owner's manual batch start")
-                approval = json.loads(row["authorization"])
-                evidence = approval["ownerAuthorization"]
-                deadline = approval.get("deadlineUtc")
-                if (deadline is not None and time.time() >= deadline) or digest(evidence["path"]) != evidence["sha256"]:
-                    raise ValueError("Manual batch start expired or provenance changed")
-            self.validate_profile_selection(order)
+    def check_launch_authorization(self, order, *, connection=None):
+        if connection is None:
+            with self.connect() as con:
+                return self.check_launch_authorization(order, connection=con)
+        con = connection
+        if con.execute("SELECT id FROM pipeline_holds").fetchone():
+            raise ValueError("Shared tooling/recovery pipeline is held for owner review")
+        slot = con.execute("SELECT * FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone()
+        if slot and (slot["status"] == "blocked" or slot["order_id"] != order["id"]):
+            raise ValueError("Another installation/run slot owns the shared environment")
+        if order.get("cycle") is not None:
+            self.validate_cycle(con, order)
+        else:
+            row = con.execute("SELECT authorization FROM releases JOIN released_orders ON releases.id=release_id WHERE released_orders.id=?", (order["id"],)).fetchone()
+            if not row:
+                raise ValueError("Standard order awaits the owner's manual batch start")
+            approval = json.loads(row["authorization"])
+            evidence = approval["ownerAuthorization"]
+            deadline = approval.get("deadlineUtc")
+            if (deadline is not None and time.time() >= deadline) or digest(evidence["path"]) != evidence["sha256"]:
+                raise ValueError("Manual batch start expired or provenance changed")
+        self.validate_profile_selection(order)
 
     @staticmethod
     def validate_profile_selection(order):

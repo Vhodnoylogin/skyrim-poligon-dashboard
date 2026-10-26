@@ -145,7 +145,7 @@ def execute(p,path):
     if state.get('runner')!=worker or state.get('order',{}).get('id')!='qualification-'+sel['qualificationId']:raise ValueError('Exact qualification worker/order required')
     archive=run/'test-profile';actual=[{'path':str(f),'sha256':m.digest(f)} for f in sorted(archive.rglob('*')) if f.is_file()]
     if not actual or actual!=packet.get('profileArchivePins') or Path(state.get('profileArchive','')).resolve()!=archive.resolve() or Path(state['testProfile']).exists():raise ValueError('Exact archived/removed profile required')
-    p.check_launch_authorization(order);p.verify_inputs(order)
+    p.verify_inputs(order)
     canonical=json.dumps({'path':str(path),'sha256':m.digest(path),'review':r},sort_keys=True,ensure_ascii=False)
     runner=activate(sel['executor'])
     with runner.native.SessionMutex(),p.connect() as con:
@@ -181,9 +181,12 @@ def execute(p,path):
             for state_file in (runtime/'runs').glob('*/state.json'):
                 if m.read(state_file).get('done') is not True:raise ValueError('Unfinished native session retains reservation')
         if m.digest(path)!=json.loads(canonical)['sha256']:raise ValueError('Admission review changed')
-        p.check_launch_authorization(order);p.verify_inputs(order)
-        con.execute("UPDATE jobs SET status='running',note='' WHERE id=?",(key,))
+        p.verify_inputs(order)
         con.execute('DELETE FROM pipeline_holds WHERE id=?',(sel['holdId'],))
+        # Observe our own uncommitted exact-hold removal, never a second reader.
+        # Failed authority checks roll back the hold and queued claim together.
+        p.check_launch_authorization(order, connection=con)
+        con.execute("UPDATE jobs SET status='running',note='' WHERE id=?",(key,))
         con.execute('INSERT INTO operator_bound_admissions VALUES(?,?)',(key,canonical))
         p.event(con,key,'bound_subject_admitted',canonical)
         p.event(con,sel['holdId'],'reviewed_hold_transferred_to_exact_subject',canonical)
