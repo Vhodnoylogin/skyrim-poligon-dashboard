@@ -230,3 +230,48 @@ The normal bootstrap, one game owner, factual subject boundary, per-case
 assertions, process-exit evidence, restoration and final-report gates remain.
 Any unknown outcome remains terminal for automatic execution; this contract
 does not provide an additional restart, checkpoint resume or automatic retry.
+
+## Collection repair for an already ended failed attempt
+
+An ended, restored attempt still collects and hashes its nonempty profile archive
+when its valid companion report is incomplete or uncertain. Such a report remains
+a confirmed transport/tool interruption with its original partial case results;
+uncertainty does not make already verified receipts or assertions disappear.
+
+An older packet that omitted the archive manifest can use
+`companion-collection-repair ATTEMPT-ID REVIEW.json`. This command never starts,
+recovers or replays a game/action, changes a launch budget, replaces a packet or
+clears a hold. It adds immutable files only below that same retry attempt's
+`collection-repair/` directory. Original packet bytes and every old evidence file
+must still match their retained hashes.
+If the original packet never pinned archive files, the supplement explicitly
+records a newly reviewed current inventory. It establishes no historical archive
+hash or membership continuity. Later changes are checked against these new pins.
+
+The review uses `schemaVersion:1`, `kind:"companion-ended-collection-repair"`,
+`attemptId`, exact pins for `packet`, `platformPlan`, `state`, `result`,
+`childExit`, `companionReport`, a complete `profileArchive` record, current
+`implementationPins`, `verifiedBy`, `reason`, and true `endedReviewed`,
+`restorationReviewed`, `archiveReviewed`, `uncertaintyRetained`, `retainHold`.
+The repair checks the exact run/attempt, consumed physical start, ended worker
+and owned processes, actual restored target hashes, removed temporary profile,
+archive membership and verified partial companion data. It retains reviewed
+collection source snapshots and, when recording, independently checks native
+process death, the live restoration targets, idle ownership and the fault hold.
+
+Verification exposes an in-memory packet view with the supplemental archive and
+source pins. The old raw packet stays unchanged. The final report pins both
+`originalPacket` and `collectionRepair`; later verification rechecks both and the
+actual archive. Existing factual-start, ended/restored/collected and exact-origin
+notification gates remain mandatory. The genuine tooling-fault hold remains.
+Historical verification uses the pinned recording proof, original source bytes
+and stored copies, closed native/companion evidence and archive inventory. It
+does not require today's collector source tree, global idle state or the old
+hold to remain unchanged after a separately authorized successor takes ownership.
+Adding current modules never replaces or weakens the original frozen proof.
+
+A nonzero process exit is retained as an observation with unknown cause. A game
+observed running before cleanup and exited later must not be relabeled as normal
+close, a mod assertion failure or proof that the earlier metadata fault was caused
+by that exit. Correcting a future binding declaration supplies no extra launch
+authorization and does not change this failed attempt's evidence.

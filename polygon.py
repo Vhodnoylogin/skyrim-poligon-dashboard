@@ -1963,10 +1963,16 @@ def main(argv=None):
         sub.add_parser(command).add_argument('request', type=Path)
     sub.add_parser('companion-pretest-admit', help='Reviewed zero-native continuation hold transfer; does not launch').add_argument('request', type=Path)
     sub.add_parser('companion-pretest-run', help='Run the exact admitted zero-native companion attempt once').add_argument('id')
+    repair = sub.add_parser('companion-collection-repair', help='Reviewed additive collection for one ended failed attempt; never launches')
+    repair.add_argument('id')
+    repair.add_argument('review', type=Path)
     args = parser.parse_args(argv)
     try:
         polygon = Polygon(session_root(args.root))
-        if args.command == 'companion-pretest-run':
+        if args.command == 'companion-collection-repair':
+            from companion_collection_repair import record
+            result = record(polygon, args.id, args.review)
+        elif args.command == 'companion-pretest-run':
             from companion_pretest_resume import run
             result = run(polygon, args.id)
         elif args.command == 'companion-pretest-admit':

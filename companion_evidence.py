@@ -336,6 +336,9 @@ def projection(p, order, packet):
     """Reverify collected bytes before using companion cases in test projection."""
     if order.get('subjectPlan', {}).get('interface') != INTERFACE:
         return None
+    if packet.get('collectionRepair'):
+        from companion_collection_repair import projection as historical_projection
+        return historical_projection(p, order, packet)
     current = collect(p, order, packet['runDirectory'], packet.get('attemptId'))
     _require(packet.get('subjectCompanion') == current, 'retained companion summary differs')
     inventory = {_path(pin['path']): pin for pin in packet.get('files', [])}

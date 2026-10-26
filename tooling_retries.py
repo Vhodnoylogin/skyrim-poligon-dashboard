@@ -339,15 +339,19 @@ class ToolingRetries:
         findings = self.collection_findings(run)
         companion = None
         if run and ticket.get('kind') == 'companion-pre-session':
+            # Archive collection is independent of transport health. An ended,
+            # restored failed attempt still needs immutable profile evidence.
+            try:
+                from companion_pretest_resume import freeze_archive
+                freeze_archive(folder, run)
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                findings.append({'component': 'subject-companion', 'kind': 'profile_archive_unverified', 'details': str(error), 'confirmed': True})
             try:
                 from companion_evidence import collect
-                from companion_pretest_resume import freeze_archive
                 companion = collect(self, order, run, attempt_id=attempt_id)
-                archive = Path(run) / 'test-profile'
-                if (not companion['completed'] or companion['uncertain'] or not archive.is_dir() or
-                        Path(state.get('profileArchive', '')).resolve() != archive.resolve() or Path(state['testProfile']).exists()):
-                    raise ValueError('Companion completion/restoration/archive proof unavailable')
-                freeze_archive(folder, run)
+                if not companion['completed'] or companion['uncertain']:
+                    findings.append({'component': 'subject-companion', 'kind': 'companion_transport_interrupted',
+                                     'details': {'completed': companion['completed'], 'uncertain': companion['uncertain']}, 'confirmed': True})
             except (ValueError, OSError, KeyError, TypeError) as error:
                 findings.append({'component': 'subject-companion', 'kind': 'companion_evidence_unverified', 'details': str(error), 'confirmed': True})
         if findings:
@@ -405,8 +409,11 @@ class ToolingRetries:
         ticket = json.loads(row['request'])
         if ticket.get('kind') == 'companion-pre-session':
             from companion_pretest_resume import context, packet_metadata, verify_archive
-            context(self, order, row['id'])
-            verify_archive(packet)
+            from companion_collection_repair import apply
+            packet = apply(self, row, packet)
+            if not packet.get('collectionRepair'):
+                context(self, order, row['id'])
+                verify_archive(packet)
             if any(packet.get(key) != value for key, value in packet_metadata(self, ticket, packet.get('runDirectory')).items()):
                 raise ValueError('Companion attempt physical-start accounting differs')
         if ticket.get('kind') == 'post-start-tooling' and packet.get('runDirectory'):
@@ -516,6 +523,8 @@ class ToolingRetries:
                   'summary': request['summary'], 'collectionFinished': True, 'packet': row['packet'],
                   'packetSha256': m.digest(row['packet']), 'testResult': projection,
                   'eligibility': 'eligible' if projection['testingStarted'] else 'suppressed'}
+        if packet.get('collectionRepair'):
+            report.update(collectionRepair=packet['collectionRepair'], originalPacket=packet['originalPacket'])
         if packet.get('attemptKind') == 'post_start_tooling':
             report.update(attemptKind=packet['attemptKind'], restartMode=packet['restartMode'],
                           launchAccounting=packet['launchAccounting'], previousReportSha256=packet['previousReportSha256'])
@@ -534,9 +543,12 @@ class ToolingRetries:
         if not row['report'] or m.digest(row['report']) != row['report_sha']:
             raise ValueError('Retry final report hash mismatch')
         report = m.read(row['report'])
-        self.verify_retry_packet(row)
+        packet = self.verify_retry_packet(row)
         if report['packetSha256'] != m.digest(row['packet']):
             raise ValueError('Retry final packet hash mismatch')
+        if (report.get('collectionRepair') != packet.get('collectionRepair') or
+                report.get('originalPacket') != packet.get('originalPacket')):
+            raise ValueError('Retry final report collection supplement differs')
         return report
 
     def pending_retries(self):
