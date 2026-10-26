@@ -110,7 +110,8 @@ flags, must match exactly. The separate expanded binding policy is reviewed data
 whose installed metadata/admission/business behavior is under test; it is not
 declared qualified by an earlier Alvor/race probe. This route supports SE with
 explicit native New Game, no Root Builder or profile reuse, and one first solo
-attempt. Cycles, shared sessions, retries and checkpoint reconnect are unsupported.
+attempt. Cycles, shared sessions and checkpoint reconnect are unsupported. The
+strict zero-native continuation below is the only supported subsequent attempt.
 
 ## Reviewed atomic execution
 
@@ -177,3 +178,55 @@ collection, final report and exact-origin notification gates still apply. Source
 tests and a prepared order do not constitute a completed CLAW mod test or authorize
 another launch. This development integration starts no game and changes no live
 database, installation, listener or external application.
+
+## Reviewed zero-native continuation
+
+A confirmed refusal before any platform plan, worker, native session or subject
+action may use one separate `companion-pre-session` attempt. It cannot reopen,
+requeue, clone or reset the original job. Its blocked packet, admission, order,
+input hashes and factual zero-start history remain unchanged. A run that reached
+native dispatch or factual subject start is ineligible for this route.
+
+The exact ticket has `schemaVersion:1`, `kind:"companion-pre-session"`, distinct
+`id`, original `orderId`, `previousPacketSha256`, and pinned `technicalAbort`,
+`ownerAuthority`, `companionSelection`, `previousAdmission` and `repair` files.
+Its `authorityReview` contains `verifiedBy`, `reason`, `retryPermitted:true`,
+`maxAdditionalAttempts:1`, `subjectActualLaunchesBefore:0`,
+`maximumSubjectActualLaunches:1` and the unchanged `originalDeadlineUtc`.
+This consumes the original unused launch; it does not extend owner authority or
+reset historical global/edition start accounting. The actual original release
+owner and finite deadline must still match at admission and native dispatch.
+
+The technical review must pin the original refusal and manager-restoration/idle
+evidence, explicitly establish `preSessionUntouched:true`, no platform plan or
+worker material, no attempt rows and no matching runtime. Repair evidence binds
+the complete current operator source inventory and retained tests. Runtime,
+client, subject, initial fixture and all inputs stay pinned; a code repair is
+not fresh native qualification or evidence that the mod passed.
+
+1. `retry-register TICKET.json` registers the separate attempt under the genuine
+   predecessor hold. It never launches or clears that hold.
+2. `companion-pretest-admit REVIEW.json` independently verifies the ticket,
+   current owner scope, repair, zero-native proof and idle environment. Under the
+   native mutex and one database transaction it removes only that genuine hold
+   and sets only the new retry attempt to `running`. It does not launch. There
+   is no hold-free queued interval for an older global dispatcher to claim.
+3. `companion-pretest-run ATTEMPT-ID` dispatches that exact admitted attempt
+   once. A durable dispatch marker and native attempt marker reject repetition.
+
+The admission review uses `kind:"operator-companion-pre-session-admission"`,
+`schemaVersion:1`, `attemptId`, exact ticket path/hash, current
+`ownerAuthorization`, `verifiedBy`, `reason`, and true `zeroNativeReviewed`,
+`preSessionUntouchedReviewed`, `restorationReviewed`, `repairReviewed` and
+`unusedStartReviewed` fields. Other active, released or queued owners, changed
+history, expired authority and unfinished native sessions retain the barrier.
+
+The new frozen plan, helper output, packet and final report live under the
+distinct `retry-attempts/ATTEMPT-ID` directory. The native order keeps the
+unchanged subject ID and adds exact `attemptId` and `subjectOrderId`; the command
+client receives the separate attempt ID. The collector requires this attribution
+and registered proof, and refuses an old report, old run or foreign attempt.
+The normal bootstrap, one game owner, factual subject boundary, per-case
+assertions, process-exit evidence, restoration and final-report gates remain.
+Any unknown outcome remains terminal for automatic execution; this contract
+does not provide an additional restart, checkpoint resume or automatic retry.

@@ -278,6 +278,98 @@ class CompanionRouteTests(unittest.TestCase):
         (self.executor / 'new-unpinned.txt').write_text('must refuse all frozen runtime changes')
         with self.assertRaisesRegex(ValueError, 'inventory'): self.p.verify_platform(self.order)
 
+    def test_baseline_gameplay_subject_and_profile_fixture_overlap_is_not_provider_identity(self):
+        self.admission_fixture()
+        with patch.object(self.p, 'execute_claimed', return_value=None): route.execute(self.p, self.reviewfile)
+        # Like the real refusal: the old tool qualification also pinned the
+        # installed mod and source-profile files as composition evidence.
+        self.qplan['pins'].extend(self.pin(Path(x['path'])) for x in self.order['inputs'])
+        plan = self.p.prepare_platform(self.order)
+        self.assertEqual(plan['subjectOrderSha256'], contract.identity(self.order))
+        for entry in self.order['inputs']:
+            self.assertIn({'path': entry['path'], 'sha256': entry['sha256']}, plan['pins'])
+        self.subject.write_bytes(b'changed subject bytes')
+        with self.assertRaisesRegex(ValueError, 'pin changed'): self.p.verify_platform(self.order)
+
+    def test_true_executor_and_staged_provider_source_or_installed_destination_collisions_refuse(self):
+        source = self.pin(self.provider)
+        installed = self.root / 'mods' / 'explicit-provider' / 'SKSE/Plugins/provider.dll'
+        installed.parent.mkdir(parents=True); installed.write_bytes(b'qualified installed copy')
+        installed_pin = self.pin(installed)
+        cfg = {'overwrite': str(self.root / 'overwrite'), 'staged_plugins': [
+            {'source': source['path'], 'sha256': source['sha256'], 'destination': 'SKSE/Plugins/provider.dll'}]}
+        q = {'executorPins': inventory(self.executor), 'pins': [source, installed_pin, self.pin(self.subject)]}
+        operator = self.pin(self.transport)
+        protected = [source, installed_pin, q['executorPins'][0], operator]
+        for target in protected:
+            for role, expected in [('subject', target['sha256']), ('fixture', target['sha256']), ('dependency', 'f' * 64)]:
+                with self.subTest(target=target['path'], role=role), self.assertRaisesRegex(ValueError, 'core baseline'):
+                    route.validate_core_overlaps({'inputs': [{**target, 'role': role, 'sha256': expected}]}, q, cfg, [operator])
+            route.validate_core_overlaps({'inputs': [{**target, 'role': 'dependency'}]}, q, cfg, [operator])
+        # Full component suffix matching, not "provider" in a subject's filename.
+        similarly_named = self.root / 'mods' / 'subject' / 'provider.dll'
+        similarly_named.parent.mkdir(parents=True); similarly_named.write_bytes(b'gameplay subject')
+        route.validate_core_overlaps({'inputs': [{**self.pin(similarly_named), 'role': 'subject'}]}, q, cfg, [operator])
+
+    def test_supported_retry_freezes_separate_plan_and_preserves_blocked_original_packet(self):
+        self.admission_fixture()
+        with patch.object(self.p, 'execute_claimed', return_value=None): route.execute(self.p, self.reviewfile)
+        original_packet = self.p.evidence_dir(self.order['id']) / 'packet.json'
+        m.write(original_packet, {'runDirectory': None, 'classification': 'zero-native-refusal'})
+        old_bytes = original_packet.read_bytes()
+        attempt = 'same-subject-pre-session-1'
+        review = self.root / 'pre-session-review.json'; m.write(review, {'review': 'zero native, explicit same-subject attempt'})
+        context = {'attemptId': attempt, 'folder': self.p.local / 'retry-attempts' / attempt, 'reviewPin': self.pin(review)}
+        with self.p.connect() as con:
+            con.execute("UPDATE jobs SET status='blocked',packet=? WHERE id=?", (str(original_packet), self.order['id']))
+            con.execute("INSERT INTO retry_attempts(id,order_id,request,created,status) VALUES(?,?,?,0,'running')",
+                        (attempt, self.order['id'], json.dumps({'kind': 'companion-pre-session'})))
+        with patch.object(route, 'attempt_context', return_value=context):
+            plan = self.p.prepare_platform(self.order, attempt_id=attempt)
+            self.assertEqual(self.p.verify_platform(self.order, attempt_id=attempt), plan)
+        self.assertEqual(plan['companionAttemptId'], attempt)
+        self.assertEqual(plan['companionPretestReview'], self.pin(review))
+        self.assertEqual(self.p.get(self.order['id'])['status'], 'blocked')
+        self.assertEqual(original_packet.read_bytes(), old_bytes)
+        self.assertTrue((context['folder'] / 'platform-plan.json').is_file())
+        self.assertFalse((self.p.evidence_dir(self.order['id']) / 'platform-plan.json').exists())
+        with self.assertRaisesRegex(ValueError, 'No frozen platform'): self.p.attempt_plan(self.order)
+
+    def test_retry_companion_uses_separate_output_and_exact_native_attempt_attribution(self):
+        attempt = 'same-subject-pre-session-1'
+        folder = self.p.local / 'retry-attempts' / attempt; folder.mkdir(parents=True)
+        review = self.root / 'pre-session-review.json'; m.write(review, {})
+        context = {'attemptId': attempt, 'folder': folder, 'reviewPin': self.pin(review)}
+        worker = {'pid': 888, 'birth': 999, 'path': 'offline-worker'}
+        game = {'pid': 222, 'birth': 333, 'path': 'offline-game'}
+        finished = threading.Event()
+        plan = {'executor': str(self.executor), 'configuration': self.cfg, 'pins': inventory(self.executor),
+                'companionSelection': {'transport': self.pin(self.transport)}}
+        def owned_run(profile, scenario_path, **kwargs):
+            native_order = {'id': self.order['id'], 'owner': self.order['sourceChat'],
+                            'attemptId': attempt, 'subjectOrderId': self.order['id']}
+            self.assertEqual(kwargs['order'], native_order); self.assertEqual(scenario_path, folder / 'scenario.json')
+            m.write(Path(self.cfg['runtime']) / 'runs/fresh/state.json', {'id': 'fresh', 'runner': worker,
+                'game': game, 'order': native_order, 'interactiveSession': {'ready': True}})
+            self.assertTrue(finished.wait(3)); return 0
+        def client(args, **kwargs):
+            self.assertEqual(args[args.index('--attempt-id') + 1], attempt)
+            self.assertEqual(args[args.index('--order-id') + 1], self.order['id'])
+            self.assertEqual(args[args.index('--output') + 1], str(folder / 'subject-companion/report.json'))
+            child = Mock(pid=500, returncode=None)
+            def wait(**kwargs): child.returncode = 0; finished.set(); return 0
+            child.wait.side_effect = wait; child.poll.side_effect = lambda: child.returncode
+            return child
+        runner = SimpleNamespace(native=SimpleNamespace(identity=lambda pid: worker), run=owned_run)
+        tracker = SimpleNamespace(snapshot=lambda: {'identityVerified': True, 'status': 'exited', 'exitCode': 0}, close=lambda: {'closeConfirmed': True})
+        with (patch.object(route, 'attempt_context', return_value=context),
+              patch.object(self.p, 'source_profile', return_value=self.order['profile']) as selected_profile,
+              patch.object(route.subprocess, 'Popen', side_effect=client),
+              patch.object(route, '_retain_client', return_value=({'pid': 500, 'birth': 501, 'path': 'own-client'}, tracker))):
+            self.assertEqual(route.run(self.p, self.order, plan, runner, attempt_id=attempt), 0)
+        selected_profile.assert_called_once_with(self.order, runner, output_dir=folder)
+        self.assertFalse((self.p.evidence_dir(self.order['id']) / 'subject-companion').exists())
+
     def test_bounded_companion_waits_for_exact_ready_run_while_runner_stays_on_main_thread(self):
         worker = {'pid': 888, 'birth': 999, 'path': 'offline-current-worker'}
         game = {'pid': 222, 'birth': 333, 'path': 'offline-current-game'}

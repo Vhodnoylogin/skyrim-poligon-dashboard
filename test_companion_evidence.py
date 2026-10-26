@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -70,7 +71,7 @@ class CompanionEvidenceTests(unittest.TestCase):
         flags = {'--executor': self.frozen['executor'], '--plan': spec['plan']['path'], '--plan-sha256': spec['plan']['sha256'],
             '--sequencer': spec['sequencer']['path'], '--sequencer-sha256': spec['sequencer']['sha256'],
             '--runtime': cfg['runtime'], '--channel-config': cfg['interactive_session']['channelConfig'],
-            '--order-id': self.order['id'], '--attempt-id': self.order['id'], '--output': str(self.folder / 'report.json'),
+            '--order-id': self.order['id'], '--attempt-id': getattr(self, 'attempt_id', self.order['id']), '--output': str(self.folder / 'report.json'),
             '--worker-identity': json.dumps(self.worker), '--game-identity': json.dumps(self.game),
             '--maximum-seconds': str(spec['maximumSeconds']), '--executor-manifest': self.manifest['path'],
             '--executor-manifest-sha256': self.manifest['sha256']}
@@ -92,11 +93,11 @@ class CompanionEvidenceTests(unittest.TestCase):
         return self.write(path, ''.join(json.dumps(row) + '\n' for row in rows))
 
     def action(self, number, name):
-        command, source = 'command-' + str(number), 'owned-order:' + str(number)
+        command, source = 'command-' + str(number), 'owned-order:' + self.state['id'] + ':' + str(number)
         envelope = {'schemaVersion': 1, 'operation': 'tool', 'tool': 'inspect', 'args': {'kind': 'state'}, 'timeoutSeconds': 5} if name else {'schemaVersion': 1, 'operation': 'finish'}
-        request = {'sessionId': 'game-fresh-run', 'expectedBinding': self.binding, 'sourceId': 'operator.actions',
+        request = {'sessionId': self.state['interactiveSession']['sessionId'], 'expectedBinding': self.binding, 'sourceId': 'operator.actions',
             'sourceEventId': source, 'kind': 'text', 'text': json.dumps(envelope),
-            'metadata': {'subjectOrder': self.order['id'], 'attemptId': self.order['id'], 'caseId': name, 'sequence': number}}
+            'metadata': {'subjectOrder': self.order['id'], 'attemptId': getattr(self, 'attempt_id', self.order['id']), 'caseId': name, 'sequence': number}}
         prefix = self.folder / str(number)
         native = {'at': number, 'kind': 'interactive-action-delivered', 'commandId': command, 'request': envelope}
         value = {'actual': True} if name else {'outcome': 'owner-finished'}
@@ -113,7 +114,7 @@ class CompanionEvidenceTests(unittest.TestCase):
             'envelope': envelope, 'request': self.write(prefix / 'request.json', request),
             'ack': self.write(prefix / 'ack.json', {'acknowledged': True, 'duplicate': False, 'command': row}),
             'deliveredEvidence': delivered, 'completion': self.write(prefix / 'completion.json',
-                {'id': number, 'sessionId': 'game-fresh-run', 'type': 'command.completed', 'createdAt': number,
+                {'id': number, 'sessionId': self.state['interactiveSession']['sessionId'], 'type': 'command.completed', 'createdAt': number,
                  'data': {'commandId': command, 'result': value}}), 'rawResult': raw}, raw
 
     def save(self):
@@ -320,6 +321,95 @@ class CompanionEvidenceTests(unittest.TestCase):
             result = self.collect(); self.assertFalse(result['completed']); self.assertTrue(result['uncertain'])
         self.report['sequencerProcess'].update(returnCode=0, stoppedByClient=True); self.save()
         self.assertFalse(self.collect()['completed'])
+
+    def retry_fixture(self):
+        self.initial_folder = self.folder
+        self.initial_run = self.run
+        self.initial_report = copy.deepcopy(self.report)
+        self.attempt_id = 'pre-session-retry-1'
+        self.p.local = self.root / 'local'
+        retry_root = self.p.local / 'retry-attempts' / self.attempt_id
+        self.folder = retry_root / 'subject-companion'; self.folder.mkdir(parents=True)
+        self.run = self.root / 'runtime' / 'runs' / 'retry-run'; self.run.mkdir()
+        self.state = copy.deepcopy(self.state)
+        self.state.update(id='retry-run', order={'id': self.order['id'], 'attemptId': self.attempt_id,
+            'subjectOrderId': self.order['id'], 'owner': 'preserved-origin'})
+        self.binding = dict(self.binding, conversationId='retry-run')
+        self.state['interactiveSession'].update(sessionId='game-retry-run', binding=self.binding)
+        self.write(self.run / 'state.json', self.state)
+        manifest = self.write(self.folder / 'executor-manifest.json', {'schemaVersion': 1, 'files': []})
+        self.manifest = {key: manifest[key] for key in ('path', 'sha256')}
+        self.steps, self.events, self.actions, self.cases = [], [], [], []
+        for number, name in enumerate(self.names, 1):
+            action, raw = self.action(number, name)
+            self.actions.append(action)
+            self.cases.append({'id': name, 'status': 'passed', 'commandIds': [action['commandId']], 'evidence': [raw]})
+        self.actions.append(self.action(len(self.names) + 1, None)[0])
+        self.report = copy.deepcopy(self.initial_report)
+        self.report.update(attemptId=self.attempt_id, runId='retry-run', sessionId='game-retry-run', binding=self.binding,
+            executorManifest=self.manifest, actions=self.actions, cases=self.cases,
+            subjectStart={key: self.actions[0][key] for key in ('caseId', 'commandId', 'sourceEventId', 'deliveredEvidence')})
+        self.write(self.folder / 'dispatch.json', self.dispatch_record()); self.save()
+        review = self.write(self.root / 'registered-retry-review.json', {'reviewed': 'registered zero-prior-native ticket'})
+        self.retry_context = {'attemptId': self.attempt_id, 'folder': retry_root,
+            'reviewPin': {key: review[key] for key in ('path', 'sha256')}}
+        self.context = Mock(return_value=self.retry_context)
+        module_patch = patch.dict(sys.modules, {'companion_pretest_resume': SimpleNamespace(context=self.context)})
+        module_patch.start(); self.addCleanup(module_patch.stop)
+        self.p.attempt_plan = Mock(return_value=self.frozen)
+
+    def test_registered_retry_collects_current_report_and_reverifies_projection(self):
+        self.retry_fixture()
+        summary = evidence.collect(self.p, self.order, self.run, self.attempt_id)
+        self.assertTrue(summary['completed']); self.assertTrue(summary['subjectStarted'])
+        self.context.assert_called_with(self.p, self.order, self.attempt_id)
+        self.p.attempt_plan.assert_called_with(self.order, self.attempt_id)
+        self.p.verify_companion_processes_dead.assert_called_with(self.order, [self.client_identity, self.child_identity], self.attempt_id)
+        self.assertIn(self.retry_context['reviewPin']['path'], [pin['path'] for pin in summary['pins']])
+        packet = {'attemptId': self.attempt_id, 'runDirectory': str(self.run), 'subjectCompanion': summary, 'files': summary['pins']}
+        self.assertEqual(evidence.projection(self.p, self.order, packet), summary)
+        Path(self.retry_context['reviewPin']['path']).write_bytes(b'changed admission')
+        with self.assertRaisesRegex(ValueError, 'hash/size changed'):
+            evidence.projection(self.p, self.order, packet)
+
+    def test_retry_wrong_attempt_folder_or_unregistered_context_refuses(self):
+        self.retry_fixture()
+        for replacement in (dict(self.retry_context, attemptId='foreign-attempt'),
+                            dict(self.retry_context, folder=self.initial_folder.parent)):
+            self.context.return_value = replacement
+            with self.assertRaisesRegex(ValueError, 'context differs'):
+                evidence.collect(self.p, self.order, self.run, self.attempt_id)
+        self.context.side_effect = ValueError('No registered zero-start retry proof')
+        with self.assertRaisesRegex(ValueError, 'No registered'):
+            evidence.collect(self.p, self.order, self.run, self.attempt_id)
+
+    def test_retry_cannot_adopt_initial_report_old_run_or_missing_attempt_attribution(self):
+        self.retry_fixture()
+        with self.assertRaisesRegex(ValueError, 'run/order/attempt'):
+            evidence.collect(self.p, self.order, self.initial_run, self.attempt_id)
+        self.write(self.folder / 'report.json', self.initial_report)
+        with self.assertRaisesRegex(ValueError, 'run/order/attempt'):
+            evidence.collect(self.p, self.order, self.run, self.attempt_id)
+        self.save()
+        del self.state['order']['subjectOrderId']; self.write(self.run / 'state.json', self.state)
+        with self.assertRaisesRegex(ValueError, 'retry native order'):
+            evidence.collect(self.p, self.order, self.run, self.attempt_id)
+
+    def test_retry_packet_without_registered_attempt_and_cross_runtime_refuse(self):
+        self.retry_fixture()
+        summary = evidence.collect(self.p, self.order, self.run, self.attempt_id)
+        packet = {'runDirectory': str(self.run), 'subjectCompanion': summary, 'files': summary['pins']}
+        with self.assertRaises(ValueError): evidence.projection(self.p, self.order, packet)
+        old_runtime = self.frozen['configuration']['runtime']
+        self.frozen['configuration']['runtime'] = str(self.root / 'foreign-runtime')
+        self.write(self.folder / 'dispatch.json', self.dispatch_record())
+        with self.assertRaisesRegex(ValueError, 'outside selected runtime'):
+            evidence.collect(self.p, self.order, self.run, self.attempt_id)
+        self.frozen['configuration']['runtime'] = old_runtime
+
+    def test_initial_collection_does_not_consult_retry_module(self):
+        with patch.dict(sys.modules, {'companion_pretest_resume': None}):
+            self.assertTrue(self.collect()['completed'])
 
 
 if __name__ == '__main__': unittest.main()

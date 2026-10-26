@@ -1116,9 +1116,9 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         pins = [{"path": str(p), "sha256": digest(p)} for p in sorted((self.executor()[0] / "skyrim_autotest").iterdir()) if p.is_file() and p.suffix in (".py", ".h", ".json")]
         return pins
 
-    def verify_companion_processes_dead(self, order, identities):
+    def verify_companion_processes_dead(self, order, identities, attempt_id=None):
         from subject_companion_route import verify_processes_dead
-        return verify_processes_dead(self, order, identities)
+        return verify_processes_dead(self, order, identities, attempt_id=attempt_id)
 
     def attempt_plan(self, order, attempt_id=None):
         key = attempt_id or order["id"]
@@ -1140,9 +1140,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         if existing:
             return self.verify_platform(order, attempt_id=attempt_id)
         if order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
-            if attempt_id: raise ValueError('File-plan retries/sharing require a separate supported contract')
             from subject_companion_route import freeze
-            return freeze(self, order)
+            return freeze(self, order, attempt_id=attempt_id)
         import order_platform
         selection = order_platform.find(self, order, attempt_id)
         manifest_path = Path(selection["manifestPath"] if selection else required_string(self.host(), "platformManifest")).resolve()
@@ -1238,9 +1237,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
 
     def verify_platform(self, order, require_file=True, attempt_id=None):
         if order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
-            if attempt_id: raise ValueError('File-plan retry attempt is unsupported')
             from subject_companion_route import verify
-            return verify(self, order, require_file)
+            return verify(self, order, require_file, attempt_id=attempt_id)
         plan = self.attempt_plan(order, attempt_id)
         folder = self.local / "retry-attempts" / attempt_id if attempt_id else self.evidence_dir(order["id"])
         if require_file and read(folder / "platform-plan.json") != plan:
@@ -1963,10 +1961,18 @@ def main(argv=None):
         sub.add_parser(command).add_argument('request', type=Path)
     for command in ('companion-bind', 'companion-execute'):
         sub.add_parser(command).add_argument('request', type=Path)
+    sub.add_parser('companion-pretest-admit', help='Reviewed zero-native continuation hold transfer; does not launch').add_argument('request', type=Path)
+    sub.add_parser('companion-pretest-run', help='Run the exact admitted zero-native companion attempt once').add_argument('id')
     args = parser.parse_args(argv)
     try:
         polygon = Polygon(session_root(args.root))
-        if args.command in ('companion-bind', 'companion-execute'):
+        if args.command == 'companion-pretest-run':
+            from companion_pretest_resume import run
+            result = run(polygon, args.id)
+        elif args.command == 'companion-pretest-admit':
+            from companion_pretest_resume import admit
+            result = admit(polygon, args.request)
+        elif args.command in ('companion-bind', 'companion-execute'):
             import subject_companion_route
             result = (subject_companion_route.register if args.command == 'companion-bind' else subject_companion_route.execute)(polygon, args.request)
         elif args.command in ('platform-bind', 'execute-bound'):

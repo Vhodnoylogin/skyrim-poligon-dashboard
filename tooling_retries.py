@@ -26,6 +26,8 @@ class ToolingRetries:
             CREATE UNIQUE INDEX IF NOT EXISTS one_pending_retry_per_subject ON retry_attempts(order_id)
               WHERE status IN ('queued','running','collecting');
             """)
+        from companion_pretest_resume import init
+        init(self)
 
     def retry_show(self, attempt_id):
         with self.connect() as con:
@@ -46,6 +48,9 @@ class ToolingRetries:
         return path
 
     def retry_authority(self, ticket):
+        if ticket.get('kind') == 'companion-pre-session':
+            from companion_pretest_resume import authority
+            return authority(self, ticket)
         m = api()
         path = self.checked_pin(ticket['ownerAuthority'])
         authority = m.read(path)
@@ -72,6 +77,9 @@ class ToolingRetries:
             raise ValueError('Retry must use the reviewed current qualified platform')
 
     def retry_predecessor(self, ticket):
+        if ticket.get('kind') == 'companion-pre-session':
+            from companion_pretest_resume import predecessor
+            return predecessor(self, ticket, allow_current=True)
         m = api()
         original = self.get(ticket['orderId'])
         order = json.loads(original['request'])
@@ -142,6 +150,10 @@ class ToolingRetries:
     def _register_retry(self, path, post_start=False):
         m = api()
         ticket = m.read(path)
+        if ticket.get('kind') == 'companion-pre-session':
+            if post_start: raise ValueError('Zero-native companion admission is not a post-start replay')
+            from companion_pretest_resume import register
+            return register(self, path)
         required = {'schemaVersion', 'id', 'orderId', 'previousPacketSha256', 'technicalAbort', 'ownerAuthority', 'authorityReview', 'platform'}
         if post_start:
             required = (required - {'technicalAbort'}) | {'kind', 'restartMode', 'technicalFailure', 'previousReport', 'launchAccounting'}
@@ -202,6 +214,15 @@ class ToolingRetries:
             if not con.execute('SELECT id FROM platform_attempts WHERE id=?', (row['id'],)).fetchone():
                 return []
         plan = self.attempt_plan(order, row['id'])
+        if json.loads(row['request']).get('kind') == 'companion-pre-session':
+            result = []
+            for path in (Path(plan['configuration']['runtime']) / 'runs').glob('*/state.json'):
+                state = m.read(path)
+                if state.get('order', {}).get('id') == order['id']:
+                    if state['order'].get('attemptId') != row['id'] or state['order'].get('subjectOrderId') != order['id']:
+                        raise ValueError('Foreign native run for zero-native companion subject')
+                    result.append((path, state))
+            return result
         return [(p, m.read(p)) for p in (Path(plan['configuration']['runtime']) / 'runs').glob('*/state.json') if m.read(p).get('order', {}).get('id') == row['id']]
 
     def child_retry(self, attempt_id):
@@ -223,7 +244,7 @@ class ToolingRetries:
                 con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or
                 con.execute("SELECT id FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone()):
                 raise ValueError('Another owner/hold blocks retry dispatch')
-        if plan.get('operatorSelection'):
+        if plan.get('companionSelection') or plan.get('operatorSelection'):
             import order_platform
             runner=order_platform.activate(plan['executor'])
         else:
@@ -231,6 +252,20 @@ class ToolingRetries:
             from skyrim_autotest import runner
         from skyrim_autotest.config import load
         runner.configure(load(folder / 'config.json'))
+        if ticket.get('kind') == 'companion-pre-session':
+            from companion_pretest_resume import before_dispatch, dispatch_claimed
+            dispatch_claimed(self, ticket)
+            before_dispatch(self, ticket)
+            with self.connect() as con:
+                con.execute('BEGIN IMMEDIATE')
+                self.retry_authority(ticket)
+                if (con.execute('SELECT id FROM pipeline_holds').fetchone() or
+                        con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or
+                        con.execute('SELECT status FROM retry_attempts WHERE id=?', (attempt_id,)).fetchone()[0] != 'running'):
+                    raise ValueError('Companion retry ownership changed before native dispatch')
+                con.execute('INSERT INTO attempts VALUES(?,?)', (attempt_id, time.time()))
+            from subject_companion_route import run
+            return run(self, order, plan, runner, attempt_id=attempt_id)
         profile = self.source_profile(order, runner, output_dir=folder)
         if ticket.get('kind') == 'post-start-tooling':
             self.verify_inputs(order)
@@ -256,6 +291,9 @@ class ToolingRetries:
         m = api()
         attempt_id = row['id']
         ticket = json.loads(row['request'])
+        if ticket.get('kind') == 'companion-pre-session':
+            from companion_pretest_resume import dispatch_claimed
+            dispatch_claimed(self, ticket)
         folder = self.local / 'retry-attempts' / attempt_id
         m.write(folder / 'attempt-request.json', ticket)
         try:
@@ -288,13 +326,30 @@ class ToolingRetries:
         folder = self.local / 'retry-attempts' / attempt_id
         folder.mkdir(parents=True, exist_ok=True)
         state = m.read(Path(run) / 'state.json') if run else {}
-        if run and (state.get('order', {}).get('id') != attempt_id or state.get('done') is not True
+        ticket = json.loads(row['request'])
+        native = state.get('order', {})
+        expected_native = (native.get('id') == order['id'] and native.get('attemptId') == attempt_id and
+                           native.get('subjectOrderId') == order['id']) if ticket.get('kind') == 'companion-pre-session' else native.get('id') == attempt_id
+        if run and (not expected_native or state.get('done') is not True
                     or state.get('restored') is not True or state.get('restoreErrors')
                     or state.get('scenarioHash') != m.digest(folder / 'scenario.json')):
             raise ValueError('Retry native completion/scenario/restoration not proven')
         outcome = state.get('result', 'failed') if run else 'blocked'
         note = state.get('reason', '') if run else reason or 'Retry preparation refused'
         findings = self.collection_findings(run)
+        companion = None
+        if run and ticket.get('kind') == 'companion-pre-session':
+            try:
+                from companion_evidence import collect
+                from companion_pretest_resume import freeze_archive
+                companion = collect(self, order, run, attempt_id=attempt_id)
+                archive = Path(run) / 'test-profile'
+                if (not companion['completed'] or companion['uncertain'] or not archive.is_dir() or
+                        Path(state.get('profileArchive', '')).resolve() != archive.resolve() or Path(state['testProfile']).exists()):
+                    raise ValueError('Companion completion/restoration/archive proof unavailable')
+                freeze_archive(folder, run)
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                findings.append({'component': 'subject-companion', 'kind': 'companion_evidence_unverified', 'details': str(error), 'confirmed': True})
         if findings:
             self.hold_pipeline(attempt_id, 'Retry evidence collection incomplete; tooling review required')
         if run:
@@ -312,6 +367,9 @@ class ToolingRetries:
                     files.append({'path': str(path), 'sha256': m.digest(path), 'bytes': path.stat().st_size})
         if run:
             files.extend(m.raw_evidence_pins(run))
+        if companion:
+            for entry in companion['pins']:
+                if entry not in files: files.append(entry)
         packet = {'schemaVersion': 1, 'attemptId': attempt_id, 'orderId': order['id'], 'mode': 'automatic',
                   'sourceChat': order['sourceChat'], 'sourceThreadId': order['sourceThreadId'], 'subject': order['subject'],
                   'executionOutcome': outcome, 'reason': note, 'runDirectory': str(run) if run else None,
@@ -319,6 +377,10 @@ class ToolingRetries:
                   'subjectOrderSha256': m.subject_contract.identity(order), 'finishedAt': time.time(),
                   'previousPacketSha256': json.loads(row['request'])['previousPacketSha256']}
         ticket = json.loads(row['request'])
+        if ticket.get('kind') == 'companion-pre-session':
+            from companion_pretest_resume import packet_metadata
+            packet.update(packet_metadata(self, ticket, run))
+            if companion: packet['subjectCompanion'] = companion
         if ticket.get('kind') == 'post-start-tooling':
             if run:
                 self.verify_continuation_review(ticket, folder)
@@ -341,6 +403,12 @@ class ToolingRetries:
         if packet.get('attemptId') != row['id'] or packet.get('subjectOrderSha256') != m.subject_contract.identity(order) or packet.get('previousPacketSha256') != json.loads(row['request'])['previousPacketSha256']:
             raise ValueError('Retry subject/attempt identity mismatch')
         ticket = json.loads(row['request'])
+        if ticket.get('kind') == 'companion-pre-session':
+            from companion_pretest_resume import context, packet_metadata, verify_archive
+            context(self, order, row['id'])
+            verify_archive(packet)
+            if any(packet.get(key) != value for key, value in packet_metadata(self, ticket, packet.get('runDirectory')).items()):
+                raise ValueError('Companion attempt physical-start accounting differs')
         if ticket.get('kind') == 'post-start-tooling' and packet.get('runDirectory'):
             self.verify_continuation_review(ticket, Path(row['packet']).parent,
                                            {Path(p['path']).resolve() for p in packet['files']})
@@ -419,7 +487,11 @@ class ToolingRetries:
         run = packet.get('runDirectory')
         if run:
             state = m.read(Path(run) / 'state.json')
-            if state.get('order', {}).get('id') != row['id'] or state.get('done') is not True or state.get('restored') is not True or state.get('restoreErrors'):
+            native = state.get('order', {})
+            custom = json.loads(row['request']).get('kind') == 'companion-pre-session'
+            expected = (native.get('id') == order['id'] and native.get('attemptId') == row['id'] and
+                        native.get('subjectOrderId') == order['id']) if custom else native.get('id') == row['id']
+            if not expected or state.get('done') is not True or state.get('restored') is not True or state.get('restoreErrors'):
                 raise ValueError('Retry completion and restoration required')
         projection = self.test_projection(order, packet)
         self_checks = self.local / 'retry-attempts' / row['id'] / 'self-checks.json'

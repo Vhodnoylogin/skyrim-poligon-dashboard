@@ -5,7 +5,7 @@ baseline's core lifecycle evidence as qualification of those capabilities.
 """
 from __future__ import annotations
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import subprocess
 import sys
 import threading
@@ -212,10 +212,40 @@ def register(p, path):
     return {'id': key, 'launch': False, 'globalHostChanged': False, 'subjectCapabilitiesQualified': False}
 
 
-def freeze(p, order):
+def validate_core_overlaps(order, q, cfg, operator_pins):
+    """Historical gameplay/fixture evidence is not an executor/provider identity."""
+    def key(path): return str(Path(path).resolve()).casefold()
+    core = {key(x['path']): x['sha256'] for x in q['executorPins'] + operator_pins}
+    destinations = []
+    for entry in cfg.get('staged_plugins', []):
+        core[key(entry['source'])] = entry['sha256']
+        destination = tuple(part.casefold() for part in PureWindowsPath(entry['destination']).parts)
+        destinations.append(destination)
+        core[key(Path(cfg['overwrite']) / Path(*PureWindowsPath(entry['destination']).parts))] = entry['sha256']
+    # The qualified installed copies have exact configured relative identities;
+    # no mod-name, filename substring, role guess or blanket q.pins classification.
+    for entry in q['pins']:
+        parts = tuple(part.casefold() for part in PureWindowsPath(entry['path']).parts)
+        if any(len(parts) >= len(dest) and parts[-len(dest):] == dest for dest in destinations):
+            core[key(entry['path'])] = entry['sha256']
+    for entry in order['inputs']:
+        expected = core.get(key(entry['path']))
+        if expected is not None and (entry['role'] != 'dependency' or entry['sha256'] != expected):
+            raise ValueError('Subject cannot impersonate a core baseline provider')
+
+
+def attempt_context(p, order, attempt_id=None):
+    if attempt_id is None:
+        return {'attemptId': order['id'], 'folder': p.evidence_dir(order['id']), 'reviewPin': None}
+    from companion_pretest_resume import context
+    return context(p, order, attempt_id)
+
+
+def freeze(p, order, attempt_id=None):
     m = api(); selection = find(p, order); q, _, _, _ = baseline(p, selection)
     cfg = configuration(p, order, selection, q); review = admission(p, order['id'])
     if not review: raise ValueError('Atomic companion admission required before preparation')
+    context = attempt_context(p, order, attempt_id)
     pins = []
     def add(value):
         path = pin(value); item = {'path': str(path), 'sha256': value['sha256']}
@@ -226,29 +256,41 @@ def freeze(p, order):
     auth = selection['ownerAuthorization']; add({'path': auth['path'], 'sha256': auth['sha256']})
     for path in sorted(m.HERE.glob('*.py')): add({'path': str(path), 'sha256': m.digest(path)})
     for entry in cfg.get('staged_plugins', []): add({'path': entry['source'], 'sha256': entry['sha256']})
-    core = {x['path']: x['sha256'] for x in q['executorPins'] + q['pins']}
-    for entry in order['inputs']:
-        if entry['path'] in core and (entry['role'] != 'dependency' or entry['sha256'] != core[entry['path']]):
-            raise ValueError('Subject cannot impersonate a core baseline provider')
+    if context['reviewPin']: add(context['reviewPin'])
+    operator_pins = [selection['request'], selection['configuration'], selection['transport'], review,
+                     {'path': auth['path'], 'sha256': auth['sha256']}]
+    operator_pins.extend({'path': str(path), 'sha256': m.digest(path)} for path in sorted(m.HERE.glob('*.py')))
+    # The baseline config is a control-plane pin; its other input pins retain
+    # their provenance hashes without becoming tool/provider declarations.
+    operator_pins.extend(x for x in q['pins'] if Path(x['path']).resolve() == Path(q['configPath']).resolve())
+    validate_core_overlaps(order, q, cfg, operator_pins)
     plan = {'schemaVersion': 1, 'interface': 'polygon-file-plan/1', 'orderId': order['id'],
             'subjectOrderSha256': m.subject_contract.identity(order), 'subjectSpecificationSha256': m.subject_contract.subject_identity(order),
             'executor': selection['executor'], 'configuration': cfg, 'scenario': scenario(order), 'pins': pins,
             'companionSelection': selection, 'companionAdmission': review, 'baselineCoreOnly': True,
             'subjectCapabilitiesQualified': False, 'preparedAt': time.time()}
+    if attempt_id is not None:
+        plan['companionAttemptId'] = context['attemptId']
+        plan['companionPretestReview'] = context['reviewPin']
     with p.connect() as con:
         con.execute('BEGIN IMMEDIATE')
-        if con.execute('SELECT status FROM jobs WHERE id=?', (order['id'],)).fetchone()[0] != 'running':
+        table = 'retry_attempts' if attempt_id is not None else 'jobs'
+        if con.execute('SELECT status FROM ' + table + ' WHERE id=?', (context['attemptId'],)).fetchone()[0] != 'running':
             raise ValueError('Companion preparation requires the atomic claimed order')
         canonical = json.dumps(plan, sort_keys=True, ensure_ascii=False)
-        con.execute('INSERT INTO platform_attempts VALUES(?,?,?)', (order['id'], canonical, m.subject_contract.identity(plan)))
-    m.write(p.evidence_dir(order['id']) / 'platform-plan.json', plan)
-    return verify(p, order)
+        con.execute('INSERT INTO platform_attempts VALUES(?,?,?)', (context['attemptId'], canonical, m.subject_contract.identity(plan)))
+    m.write(context['folder'] / 'platform-plan.json', plan)
+    return verify(p, order, attempt_id=attempt_id)
 
 
-def verify(p, order, require_file=True):
-    m = api(); plan = p.attempt_plan(order)
-    if require_file and m.read(p.evidence_dir(order['id']) / 'platform-plan.json') != plan:
+def verify(p, order, require_file=True, attempt_id=None):
+    m = api(); context = attempt_context(p, order, attempt_id)
+    plan = p.attempt_plan(order, attempt_id) if attempt_id is not None else p.attempt_plan(order)
+    if require_file and m.read(context['folder'] / 'platform-plan.json') != plan:
         raise ValueError('Companion platform plan changed')
+    if attempt_id is not None and (plan.get('companionAttemptId') != context['attemptId'] or
+            plan.get('companionPretestReview') != context['reviewPin']):
+        raise ValueError('Companion pre-session attempt context changed')
     if find(p, order) != plan['companionSelection'] or admission(p, order['id']) != plan['companionAdmission']:
         raise ValueError('Companion selection/admission changed')
     for entry in plan['pins']: pin(entry)
@@ -262,9 +304,9 @@ def verify(p, order, require_file=True):
     return plan
 
 
-def verify_processes_dead(p, order, identities):
+def verify_processes_dead(p, order, identities, attempt_id=None):
     """Fresh isolated read-only inventory; unavailable same-PID identity refuses."""
-    plan = verify(p, order)
+    plan = verify(p, order, attempt_id=attempt_id)
     code = """import json,sys
 from pathlib import Path
 root=Path(sys.argv[1]).resolve();sys.path.insert(0,str(root))
@@ -370,9 +412,10 @@ def execute(p, path):
     return p.execute_claimed(row)
 
 
-def run(p, order, plan, runner):
+def run(p, order, plan, runner, attempt_id=None):
     """Original main thread owns the runner; a bounded companion only exchanges data."""
-    m = api(); folder = p.evidence_dir(order['id']); output = folder / 'subject-companion'
+    m = api(); context = attempt_context(p, order, attempt_id)
+    folder = context['folder']; output = folder / 'subject-companion'
     if output.exists(): raise ValueError('Companion output exists; reconnect/replay refused')
     output.mkdir()
     inventory = [{'path': x['path'], 'sha256': x['sha256']} for x in plan['pins']
@@ -388,7 +431,17 @@ def run(p, order, plan, runner):
         try:
             end = time.monotonic() + 600
             while not stop.is_set() and time.monotonic() < end:
-                matches = p.matching_runs(order)
+                if attempt_id is None:
+                    matches = p.matching_runs(order)
+                else:
+                    matches = []
+                    for state_path in (Path(plan['configuration']['runtime']) / 'runs').glob('*/state.json'):
+                        candidate = m.read(state_path)
+                        if candidate.get('order', {}).get('id') == order['id']:
+                            if (candidate['order'].get('attemptId') != context['attemptId'] or
+                                    candidate['order'].get('subjectOrderId') != order['id']):
+                                raise ValueError('Companion native attempt identity differs; no old-run adoption')
+                            matches.append((state_path, candidate))
                 if len(matches) > 1: raise ValueError('Multiple native runs for one companion subject')
                 if matches:
                     _, state = matches[0]
@@ -400,7 +453,7 @@ def run(p, order, plan, runner):
                                 '--plan', spec['plan']['path'], '--plan-sha256', spec['plan']['sha256'],
                                 '--sequencer', spec['sequencer']['path'], '--sequencer-sha256', spec['sequencer']['sha256'],
                                 '--runtime', plan['configuration']['runtime'], '--channel-config', plan['configuration']['interactive_session']['channelConfig'],
-                                '--order-id', order['id'], '--attempt-id', order['id'], '--worker-identity', json.dumps(worker),
+                                '--order-id', order['id'], '--attempt-id', context['attemptId'], '--worker-identity', json.dumps(worker),
                                 '--game-identity', json.dumps(state['game']), '--output', str(output / 'report.json'),
                                 '--maximum-seconds', str(spec['maximumSeconds'])]
                         record = {'argv': args, 'source': selection['transport'], 'identity': None,
@@ -439,8 +492,13 @@ def run(p, order, plan, runner):
             m.write(output / 'dispatch.json', {'schemaVersion': 1, 'orderId': order['id'], 'worker': worker, **outcome})
     thread = threading.Thread(target=companion, name='subject-companion', daemon=True); thread.start()
     try:
-        return runner.run(p.source_profile(order, runner), folder / 'scenario.json', restart_idle_mo2=True,
-                          order={'id': order['id'], 'owner': order['sourceChat']})
+        native_order = {'id': order['id'], 'owner': order['sourceChat']}
+        if attempt_id is None:
+            profile = p.source_profile(order, runner)
+        else:
+            native_order.update(attemptId=context['attemptId'], subjectOrderId=order['id'])
+            profile = p.source_profile(order, runner, output_dir=folder)
+        return runner.run(profile, folder / 'scenario.json', restart_idle_mo2=True, order=native_order)
     finally:
         stop.set(); thread.join(timeout=order['subjectPlan']['maximumSeconds'] + 65)
         if thread.is_alive(): raise ValueError('Companion did not settle; preserve native/session barrier')

@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path, PureWindowsPath
+import re
 import stat
 
 INTERFACE = 'polygon-file-plan/1'
@@ -74,8 +75,8 @@ def _identity(value):
             (Path(value['path']).is_absolute() or PureWindowsPath(value['path']).is_absolute()))
 
 
-def _processes(p, order, state, report, dispatch, files, root):
-    frozen = p.attempt_plan(order)
+def _processes(p, order, state, report, dispatch, files, root, attempt_id=None):
+    frozen = p.attempt_plan(order, attempt_id) if attempt_id is not None else p.attempt_plan(order)
     source = frozen['companionSelection']['transport']
     client = dispatch['client']
     _require(client.get('source') == report.get('transport') == source and _identity(client.get('identity')),
@@ -91,7 +92,7 @@ def _processes(p, order, state, report, dispatch, files, root):
         '--plan-sha256': spec['plan']['sha256'], '--sequencer': spec['sequencer']['path'],
         '--sequencer-sha256': spec['sequencer']['sha256'], '--runtime': cfg['runtime'],
         '--channel-config': cfg['interactive_session']['channelConfig'], '--order-id': order['id'],
-        '--attempt-id': order['id'], '--output': str(root / 'report.json')}
+        '--attempt-id': attempt_id if attempt_id is not None else order['id'], '--output': str(root / 'report.json')}
     extra = {'--worker-identity', '--game-identity', '--maximum-seconds', '--executor-manifest', '--executor-manifest-sha256'}
     _require(len(flags) == (len(argv) - 2) // 2 and set(flags) == set(required) | extra and
              all(flags[key] == value for key, value in required.items()) and
@@ -114,14 +115,19 @@ def _processes(p, order, state, report, dispatch, files, root):
              inner['identity']['pid'] != client['identity']['pid'] and type(inner.get('stoppedByClient')) is bool,
              'sequencer process identity differs')
     verifier = getattr(p, 'verify_companion_processes_dead', None)
-    _require(callable(verifier) and verifier(order, [client['identity'], inner['identity']]) is True,
+    identities = [client['identity'], inner['identity']]
+    verified = callable(verifier) and (verifier(order, identities, attempt_id) if attempt_id is not None else verifier(order, identities))
+    _require(verified is True,
              'independent complete process-death verification required')
+    if attempt_id is not None:
+        expected_state = _path(Path(cfg['runtime']) / 'runs' / state['id'] / 'state.json')
+        _require(str(expected_state) in files.pins, 'retry run is outside selected runtime')
     return (exit_ok and code == dispatch.get('returncode') == 0 and not client['timedOut'] and
             not client['terminatedOwnedClient'] and type(inner.get('returnCode')) is int and
             inner['returnCode'] == 0 and not inner['stoppedByClient'])
 
 
-def collect(p, order, run):
+def collect(p, order, run, attempt_id=None):
     """Return verified additive checks/pins, or None for an ordinary static plan.
 
     Invalid/missing evidence raises; callers must record a collection fault and
@@ -129,18 +135,32 @@ def collect(p, order, run):
     a tooling fault: callers must check both returned flags before finalization.
     """
     try:
-        return _collect(p, order, run)
+        return _collect(p, order, run, attempt_id)
     except (KeyError, TypeError, AttributeError, IndexError) as error:
         raise ValueError('Subject companion: malformed evidence shape') from error
 
 
-def _collect(p, order, run):
+def _collect(p, order, run, attempt_id=None):
     plan = order.get('subjectPlan', {})
     if plan.get('interface') != INTERFACE:
         return None
     run = _path(run)
-    root = _path(p.evidence_dir(order['id']) / 'subject-companion')
+    review_pin = None
+    if attempt_id is None:
+        folder, expected_attempt = p.evidence_dir(order['id']), order['id']
+    else:
+        _require(isinstance(attempt_id, str) and re.fullmatch(r'[a-z0-9][a-z0-9-]{0,79}', attempt_id) is not None,
+                 'safe registered retry attempt required')
+        from companion_pretest_resume import context
+        selected = context(p, order, attempt_id)
+        _require(set(selected) == {'attemptId', 'folder', 'reviewPin'} and selected['attemptId'] == attempt_id and
+                 _path(selected['folder']) == _path(p.local / 'retry-attempts' / attempt_id) and
+                 set(selected['reviewPin']) == {'path', 'sha256'}, 'registered retry context differs')
+        folder, expected_attempt, review_pin = selected['folder'], attempt_id, selected['reviewPin']
+    root = _path(folder / 'subject-companion')
     files = _Files((root, _path(run / 'interactive-results')))
+    if review_pin is not None:
+        files.read(review_pin, confined=False)
     state, _ = files.json(run / 'state.json', confined=False)
     steps, _ = files.lines(run / 'steps.jsonl', confined=False, maximum=128 * 1024 * 1024)
     report, report_pin = files.json(root / 'report.json')
@@ -150,8 +170,11 @@ def _collect(p, order, run):
              type(report.get('uncertain')) is bool and type(report.get('subjectStarted')) is bool and
              report.get('status') in {'completed', 'stopped'}, 'final report shape required')
     _require(state.get('order', {}).get('id') == order['id'] and report.get('orderId') == order['id'] and
-             report.get('attemptId') == order['id'] and report.get('runId') == state.get('id') and
+             report.get('attemptId') == expected_attempt and report.get('runId') == state.get('id') and
              isinstance(state.get('id'), str) and bool(state['id']), 'run/order/attempt differs')
+    if attempt_id is not None:
+        _require(state['order'].get('attemptId') == attempt_id and state['order'].get('subjectOrderId') == order['id'],
+                 'retry native order attribution differs')
     metadata = state.get('interactiveSession', {})
     binding = {'provider': 'skyrim-autotest', 'conversationId': state['id'], 'agentId': 'owned-game-executor'}
     _require(report.get('sessionId') == metadata.get('sessionId') == 'game-' + state['id'] and
@@ -161,7 +184,7 @@ def _collect(p, order, run):
     _require(dispatch.get('schemaVersion') == 1 and dispatch.get('orderId') == order['id'] and
              dispatch.get('worker') == state['runner'], 'dispatch identity differs')
     dispatch_ok = type(dispatch.get('returncode')) is int and dispatch['returncode'] == 0 and 'error' not in dispatch
-    processes_ok = _processes(p, order, state, report, dispatch, files, root)
+    processes_ok = _processes(p, order, state, report, dispatch, files, root, attempt_id)
     dispatch_ok = dispatch_ok and processes_ok
     for key in ('plan', 'sequencer'):
         _require(report.get(key) == plan.get(key), key + ' pin differs')
@@ -213,7 +236,7 @@ def _collect(p, order, run):
         _require(request.get('sessionId') == report['sessionId'] and request.get('expectedBinding') == binding and
                  request.get('sourceId') == metadata.get('sourceId') and request.get('sourceEventId') == source and
                  request.get('kind') == 'text' and _json(request['text'].encode('utf-8')) == envelope and
-                 request.get('metadata') == {'subjectOrder': order['id'], 'attemptId': order['id'], 'caseId': case, 'sequence': number},
+                 request.get('metadata') == {'subjectOrder': order['id'], 'attemptId': expected_attempt, 'caseId': case, 'sequence': number},
                  'ingress request differs')
         if action.get('ack'):
             ack, _ = files.json(action['ack'])
@@ -313,7 +336,7 @@ def projection(p, order, packet):
     """Reverify collected bytes before using companion cases in test projection."""
     if order.get('subjectPlan', {}).get('interface') != INTERFACE:
         return None
-    current = collect(p, order, packet['runDirectory'])
+    current = collect(p, order, packet['runDirectory'], packet.get('attemptId'))
     _require(packet.get('subjectCompanion') == current, 'retained companion summary differs')
     inventory = {_path(pin['path']): pin for pin in packet.get('files', [])}
     for pin in current['pins']:
