@@ -68,6 +68,8 @@ class SharedSessions:
                 if con.execute('SELECT order_id FROM session_members WHERE order_id=?', (job,)).fetchone():
                     raise ValueError('Order already belongs to an immutable session')
                 order = json.loads(row['request'])
+                if con.execute('SELECT id FROM operator_platform_bindings WHERE order_id=?',(job,)).fetchone():
+                    raise ValueError('Explicit operator selection supports solo attempts only')
                 if order.get('cycle'):
                     raise ValueError('Cycle installation slots are single-order; use separate sessions until shared slot preparation is supported')
                 orders.append(order)

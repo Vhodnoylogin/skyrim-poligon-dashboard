@@ -165,6 +165,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         self.init_retries()
         self.init_autotest_workflow()
         self.init_qualifications()
+        import order_platform
+        order_platform.init(self)
 
     @contextlib.contextmanager
     def connect(self):
@@ -728,6 +730,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                     if slot and (slot["status"] == "blocked" or slot["order_id"] != candidate["id"]):
                         continue
                     request = json.loads(candidate["request"])
+                    if con.execute('SELECT id FROM operator_platform_bindings WHERE order_id=?',(candidate['id'],)).fetchone():
+                        continue  # Only reviewed atomic execute-bound admits these orders.
                     if request.get("cycle") is not None or con.execute("SELECT id FROM released_orders WHERE id=?", (candidate["id"],)).fetchone():
                         row = candidate
                         break
@@ -1102,7 +1106,9 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             existing = con.execute("SELECT id FROM platform_attempts WHERE id=?", (platform_key,)).fetchone()
         if existing:
             return self.verify_platform(order, attempt_id=attempt_id)
-        manifest_path = Path(required_string(self.host(), "platformManifest")).resolve()
+        import order_platform
+        selection = order_platform.find(self, order, attempt_id)
+        manifest_path = Path(selection["manifestPath"] if selection else required_string(self.host(), "platformManifest")).resolve()
         pins = []
         def pin_file(path, expected=None):
             path = Path(path).resolve()
@@ -1128,7 +1134,10 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             raise ValueError("Platform must pin its installed providers")
         for tool in tools:
             pin_file(manifest_path.parent / required_string(tool, "path"), required_string(tool, "sha256"))
-        executor, validate = self.executor()
+        if selection:
+            executor, validate = Path(selection["executor"]), None
+        else:
+            executor, validate = self.executor()
         for p in sorted((executor / "skyrim_autotest").rglob("*")):
             if p.is_file() and p.suffix in (".py", ".h", ".json"): pin_file(p)
         if not (executor / "run.py").is_file():
@@ -1146,12 +1155,20 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             pin_file(qualification_path.parent / required_string(entry, "path"), required_string(entry, "sha256"))
         config_path = (manifest_path.parent / required_string(manifest, "config")).resolve()
         pin_file(config_path)
-        from skyrim_autotest.config import load
-        config = load(config_path)
+        scenario = subject_contract.compile_plan(order["subjectPlan"], manifest["operations"])
+        if selection:
+            config = order_platform.isolated_config(executor, config_path, scenario)
+        else:
+            from skyrim_autotest.config import load
+            config = load(config_path)
+            validate(scenario)
         if qualification.get("configurationSha256") != subject_contract.identity(config):
             raise ValueError("Platform configuration lacks qualification")
-        scenario = subject_contract.compile_plan(order["subjectPlan"], manifest["operations"])
-        validate(scenario)
+        if selection:
+            pin_file(selection["request"]["path"], selection["request"]["sha256"])
+            review = read(selection["request"]["path"])
+            pin_file(review["ownerAuthorization"]["path"], review["ownerAuthorization"]["sha256"])
+            for source in sorted(HERE.glob("*.py")): pin_file(source)
         # A game dependency can also be used by the qualified platform. Preserve
         # both pins, but never admit a provider as the subject or accept drift.
         platform_pins = {str(Path(p["path"]).resolve()).casefold(): p["sha256"] for p in pins}
@@ -1165,6 +1182,12 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                 "manifestPath": str(manifest_path),
                 "configuration": config, "scenario": scenario, "preparedAt": time.time(),
                 "qualification": {"path": str(qualification_path), "sha256": digest(qualification_path)}}
+        if selection:
+            plan["operatorSelection"] = selection
+            admission = order_platform.admission(self, order['id'])
+            if admission:
+                pin_file(admission['path'], admission['sha256'])
+                plan['operatorAdmission'] = admission
         canonical = json.dumps(plan, ensure_ascii=False, sort_keys=True)
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -1181,10 +1204,18 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         folder = self.local / "retry-attempts" / attempt_id if attempt_id else self.evidence_dir(order["id"])
         if require_file and read(folder / "platform-plan.json") != plan:
             raise ValueError("Retained platform plan file changed")
-        if str(Path(self.host()["executor"]).resolve()) != plan["executor"]:
-            raise ValueError("Platform executor selection changed after preparation")
-        if str(Path(self.host()["platformManifest"]).resolve()) != plan["manifestPath"]:
-            raise ValueError("Platform manifest selection changed after preparation")
+        if plan.get("operatorSelection"):
+            import order_platform
+            selection = order_platform.find(self, order, attempt_id)
+            if selection != plan["operatorSelection"] or selection["executor"] != plan["executor"] or selection["manifestPath"] != plan["manifestPath"]:
+                raise ValueError("Operator platform selection changed after preparation")
+            if plan.get('operatorAdmission') and order_platform.admission(self, order['id']) != plan['operatorAdmission']:
+                raise ValueError('Atomic admission provenance changed')
+        else:
+            if str(Path(self.host()["executor"]).resolve()) != plan["executor"]:
+                raise ValueError("Platform executor selection changed after preparation")
+            if str(Path(self.host()["platformManifest"]).resolve()) != plan["manifestPath"]:
+                raise ValueError("Platform manifest selection changed after preparation")
         actual = {str(p.resolve()) for p in (Path(plan["executor"]) / "skyrim_autotest").rglob("*") if p.is_file() and p.suffix in (".py", ".h", ".json")}
         expected = {p["path"] for p in plan["pins"] if Path(p["path"]).is_relative_to(Path(plan["executor"]) / "skyrim_autotest")}
         if actual != expected:
@@ -1419,6 +1450,9 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         row = self.claim()
         if not row:
             return {"status": "idle_or_busy"}
+        return self.execute_claimed(row)
+
+    def execute_claimed(self, row):
         order = json.loads(row["request"])
         folder = self.evidence_dir(row["id"])
         folder.mkdir(parents=True, exist_ok=True)
@@ -1468,8 +1502,14 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         for pin in read(self.evidence_dir(job) / "executor-pins.json"):
             if digest(pin["path"]) != pin["sha256"]:
                 raise ValueError("Executor changed after claim")
-        self.executor()
-        from skyrim_autotest import runner
+        if order.get("schemaVersion") == 2 and plan.get("operatorSelection"):
+            import order_platform
+            if not plan.get('operatorAdmission') or order_platform.admission(self, order['id']) != plan['operatorAdmission']:
+                raise ValueError('Exact atomic operator admission is required before native dispatch')
+            runner = order_platform.activate(plan["executor"])
+        else:
+            self.executor()
+            from skyrim_autotest import runner
         from skyrim_autotest.config import load
         runner.configure(load(self.evidence_dir(job) / "config.json"))
         return runner.run(self.source_profile(order, runner), self.evidence_dir(job) / "scenario.json",
@@ -1849,10 +1889,15 @@ def main(argv=None):
         item.add_argument('review', type=Path)
     for name in ("qualification-show", "qualification-check", "qualification-run", "qualification-collect", "qualification-recover", "_execute-qualification", "_recover-qualification", "_check-qualification"):
         sub.add_parser(name).add_argument("id")
+    for command in ('platform-bind', 'execute-bound'):
+        sub.add_parser(command).add_argument('request', type=Path)
     args = parser.parse_args(argv)
     try:
         polygon = Polygon(session_root(args.root))
-        if args.command == "submit": result = polygon.submit(args.order)
+        if args.command in ('platform-bind', 'execute-bound'):
+            import order_platform
+            result = (order_platform.register if args.command == 'platform-bind' else order_platform.execute)(polygon, args.request)
+        elif args.command == "submit": result = polygon.submit(args.order)
         elif args.command == "qualification-register": result = polygon.register_qualification(args.request)
         elif args.command == "qualification-show": result = polygon.qualification_show(args.id)
         elif args.command in ('qualification-reconcile-pre-native', 'qualification-finish-pre-native'):

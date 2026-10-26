@@ -43,6 +43,9 @@ manual game. Test requests remain data; they do not redefine Polygon's role.
 For a one-shot installation outside a full cycle, use the existing-command
 [standard preparation barrier](docs/standard-preparation.md).
 
+For an explicitly reviewed solo order that needs a different edition/platform from
+the global host, see [operator platform selection](docs/order-platform-binding.md).
+
 The originating chat owns test design and mod conclusions. A ready order has:
 
 1. A built mod and exact **installed** test inputs, SHA256 pins, dependencies and

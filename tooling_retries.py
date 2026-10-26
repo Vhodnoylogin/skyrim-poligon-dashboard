@@ -223,8 +223,12 @@ class ToolingRetries:
                 con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or
                 con.execute("SELECT id FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone()):
                 raise ValueError('Another owner/hold blocks retry dispatch')
-        self.executor()
-        from skyrim_autotest import runner
+        if plan.get('operatorSelection'):
+            import order_platform
+            runner=order_platform.activate(plan['executor'])
+        else:
+            self.executor()
+            from skyrim_autotest import runner
         from skyrim_autotest.config import load
         runner.configure(load(folder / 'config.json'))
         profile = self.source_profile(order, runner, output_dir=folder)
