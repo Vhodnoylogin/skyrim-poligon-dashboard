@@ -13,6 +13,19 @@ def api():
     return polygon
 
 
+COMPANION_KINDS = {'companion-pre-session', 'companion-post-start-tooling'}
+
+
+def companion_protocol(ticket):
+    if ticket.get('kind') == 'companion-pre-session':
+        import companion_pretest_resume
+        return companion_pretest_resume
+    if ticket.get('kind') == 'companion-post-start-tooling':
+        import companion_post_start
+        return companion_post_start
+    return None
+
+
 class ToolingRetries:
     def init_retries(self):
         with self.connect() as con:
@@ -27,6 +40,8 @@ class ToolingRetries:
               WHERE status IN ('queued','running','collecting');
             """)
         from companion_pretest_resume import init
+        init(self)
+        from companion_post_start import init
         init(self)
 
     def retry_show(self, attempt_id):
@@ -48,9 +63,9 @@ class ToolingRetries:
         return path
 
     def retry_authority(self, ticket):
-        if ticket.get('kind') == 'companion-pre-session':
-            from companion_pretest_resume import authority
-            return authority(self, ticket)
+        protocol = companion_protocol(ticket)
+        if protocol:
+            return protocol.authority(self, ticket)
         m = api()
         path = self.checked_pin(ticket['ownerAuthority'])
         authority = m.read(path)
@@ -77,9 +92,9 @@ class ToolingRetries:
             raise ValueError('Retry must use the reviewed current qualified platform')
 
     def retry_predecessor(self, ticket):
-        if ticket.get('kind') == 'companion-pre-session':
-            from companion_pretest_resume import predecessor
-            return predecessor(self, ticket, allow_current=True)
+        protocol = companion_protocol(ticket)
+        if protocol:
+            return protocol.predecessor(self, ticket, allow_current=True)
         m = api()
         original = self.get(ticket['orderId'])
         order = json.loads(original['request'])
@@ -150,6 +165,10 @@ class ToolingRetries:
     def _register_retry(self, path, post_start=False):
         m = api()
         ticket = m.read(path)
+        if ticket.get('kind') == 'companion-post-start-tooling':
+            if not post_start: raise ValueError('Companion post-start replay requires continuation-register')
+            from companion_post_start import register
+            return register(self, path)
         if ticket.get('kind') == 'companion-pre-session':
             if post_start: raise ValueError('Zero-native companion admission is not a post-start replay')
             from companion_pretest_resume import register
@@ -199,7 +218,7 @@ class ToolingRetries:
                 con.execute("SELECT id FROM retry_attempts WHERE status IN ('running','collecting')").fetchone() or
                 con.execute("SELECT id FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone()):
                 return None
-            row = con.execute("SELECT * FROM retry_attempts WHERE status='queued' ORDER BY created,id LIMIT 1").fetchone()
+            row = con.execute("SELECT * FROM retry_attempts WHERE status='queued' AND COALESCE(json_extract(request,'$.kind'),'') NOT IN ('companion-pre-session','companion-post-start-tooling') ORDER BY created,id LIMIT 1").fetchone()
             if not row:
                 return None
             if con.execute("SELECT id FROM jobs WHERE status='queued' AND submitted < ? AND (id IN (SELECT id FROM released_orders) OR json_extract(request,'$.cycle') IS NOT NULL)", (row['created'],)).fetchone():
@@ -214,13 +233,13 @@ class ToolingRetries:
             if not con.execute('SELECT id FROM platform_attempts WHERE id=?', (row['id'],)).fetchone():
                 return []
         plan = self.attempt_plan(order, row['id'])
-        if json.loads(row['request']).get('kind') == 'companion-pre-session':
+        if json.loads(row['request']).get('kind') in COMPANION_KINDS:
             result = []
             for path in (Path(plan['configuration']['runtime']) / 'runs').glob('*/state.json'):
                 state = m.read(path)
                 if state.get('order', {}).get('id') == order['id']:
                     if state['order'].get('attemptId') != row['id'] or state['order'].get('subjectOrderId') != order['id']:
-                        raise ValueError('Foreign native run for zero-native companion subject')
+                        raise ValueError('Foreign native run for companion subject attempt')
                     result.append((path, state))
             return result
         return [(p, m.read(p)) for p in (Path(plan['configuration']['runtime']) / 'runs').glob('*/state.json') if m.read(p).get('order', {}).get('id') == row['id']]
@@ -252,10 +271,10 @@ class ToolingRetries:
             from skyrim_autotest import runner
         from skyrim_autotest.config import load
         runner.configure(load(folder / 'config.json'))
-        if ticket.get('kind') == 'companion-pre-session':
-            from companion_pretest_resume import before_dispatch, dispatch_claimed
-            dispatch_claimed(self, ticket)
-            before_dispatch(self, ticket)
+        protocol = companion_protocol(ticket)
+        if protocol:
+            protocol.dispatch_claimed(self, ticket)
+            protocol.before_dispatch(self, ticket)
             with self.connect() as con:
                 con.execute('BEGIN IMMEDIATE')
                 self.retry_authority(ticket)
@@ -291,9 +310,9 @@ class ToolingRetries:
         m = api()
         attempt_id = row['id']
         ticket = json.loads(row['request'])
-        if ticket.get('kind') == 'companion-pre-session':
-            from companion_pretest_resume import dispatch_claimed
-            dispatch_claimed(self, ticket)
+        protocol = companion_protocol(ticket)
+        if protocol:
+            protocol.dispatch_claimed(self, ticket)
         folder = self.local / 'retry-attempts' / attempt_id
         m.write(folder / 'attempt-request.json', ticket)
         try:
@@ -329,7 +348,7 @@ class ToolingRetries:
         ticket = json.loads(row['request'])
         native = state.get('order', {})
         expected_native = (native.get('id') == order['id'] and native.get('attemptId') == attempt_id and
-                           native.get('subjectOrderId') == order['id']) if ticket.get('kind') == 'companion-pre-session' else native.get('id') == attempt_id
+                           native.get('subjectOrderId') == order['id']) if ticket.get('kind') in COMPANION_KINDS else native.get('id') == attempt_id
         if run and (not expected_native or state.get('done') is not True
                     or state.get('restored') is not True or state.get('restoreErrors')
                     or state.get('scenarioHash') != m.digest(folder / 'scenario.json')):
@@ -337,8 +356,11 @@ class ToolingRetries:
         outcome = state.get('result', 'failed') if run else 'blocked'
         note = state.get('reason', '') if run else reason or 'Retry preparation refused'
         findings = self.collection_findings(run)
+        if not run and ticket.get('kind') == 'companion-post-start-tooling':
+            findings.append({'component': 'subject-companion', 'kind': 'companion_preparation_refused',
+                             'details': note, 'confirmed': True})
         companion = None
-        if run and ticket.get('kind') == 'companion-pre-session':
+        if run and ticket.get('kind') in COMPANION_KINDS:
             # Archive collection is independent of transport health. An ended,
             # restored failed attempt still needs immutable profile evidence.
             try:
@@ -381,9 +403,9 @@ class ToolingRetries:
                   'subjectOrderSha256': m.subject_contract.identity(order), 'finishedAt': time.time(),
                   'previousPacketSha256': json.loads(row['request'])['previousPacketSha256']}
         ticket = json.loads(row['request'])
-        if ticket.get('kind') == 'companion-pre-session':
-            from companion_pretest_resume import packet_metadata
-            packet.update(packet_metadata(self, ticket, run))
+        protocol = companion_protocol(ticket)
+        if protocol:
+            packet.update(protocol.packet_metadata(self, ticket, run))
             if companion: packet['subjectCompanion'] = companion
         if ticket.get('kind') == 'post-start-tooling':
             if run:
@@ -416,6 +438,13 @@ class ToolingRetries:
                 verify_archive(packet)
             if any(packet.get(key) != value for key, value in packet_metadata(self, ticket, packet.get('runDirectory')).items()):
                 raise ValueError('Companion attempt physical-start accounting differs')
+        if ticket.get('kind') == 'companion-post-start-tooling':
+            from companion_post_start import context, packet_metadata
+            from companion_pretest_resume import verify_archive
+            context(self, order, row['id'])
+            verify_archive(packet)
+            if any(packet.get(key) != value for key, value in packet_metadata(self, ticket, packet.get('runDirectory')).items()):
+                raise ValueError('Companion post-start identity or physical-start accounting differs')
         if ticket.get('kind') == 'post-start-tooling' and packet.get('runDirectory'):
             self.verify_continuation_review(ticket, Path(row['packet']).parent,
                                            {Path(p['path']).resolve() for p in packet['files']})
@@ -495,7 +524,7 @@ class ToolingRetries:
         if run:
             state = m.read(Path(run) / 'state.json')
             native = state.get('order', {})
-            custom = json.loads(row['request']).get('kind') == 'companion-pre-session'
+            custom = json.loads(row['request']).get('kind') in COMPANION_KINDS
             expected = (native.get('id') == order['id'] and native.get('attemptId') == row['id'] and
                         native.get('subjectOrderId') == order['id']) if custom else native.get('id') == row['id']
             if not expected or state.get('done') is not True or state.get('restored') is not True or state.get('restoreErrors'):
@@ -525,7 +554,7 @@ class ToolingRetries:
                   'eligibility': 'eligible' if projection['testingStarted'] else 'suppressed'}
         if packet.get('collectionRepair'):
             report.update(collectionRepair=packet['collectionRepair'], originalPacket=packet['originalPacket'])
-        if packet.get('attemptKind') == 'post_start_tooling':
+        if packet.get('attemptKind') in ('post_start_tooling', 'companion_post_start_tooling'):
             report.update(attemptKind=packet['attemptKind'], restartMode=packet['restartMode'],
                           launchAccounting=packet['launchAccounting'], previousReportSha256=packet['previousReportSha256'])
         target = self.local / 'final-reports' / request['id'] / 'report.json'
@@ -549,6 +578,10 @@ class ToolingRetries:
         if (report.get('collectionRepair') != packet.get('collectionRepair') or
                 report.get('originalPacket') != packet.get('originalPacket')):
             raise ValueError('Retry final report collection supplement differs')
+        if packet.get('attemptKind') == 'companion_post_start_tooling' and any(
+                report.get(key) != packet.get(key) for key in
+                ('attemptKind', 'restartMode', 'launchAccounting', 'previousReportSha256')):
+            raise ValueError('Companion final report replay/accounting differs')
         return report
 
     def pending_retries(self):
@@ -594,8 +627,10 @@ class ToolingRetries:
             report = self.verify_retry_report(row) if row['report'] else None
             projection = report['testResult'] if report else None
             ticket = json.loads(row['request'])
-            accounting = self.verify_retry_packet(row).get('launchAccounting') if row['packet'] and ticket.get('kind') == 'post-start-tooling' else None
-            result.append({'id': row['id'], 'subjectOrderId': order['id'], 'attemptKind': 'post_start_tooling' if ticket.get('kind') == 'post-start-tooling' else 'tooling_retry',
+            accounting = self.verify_retry_packet(row).get('launchAccounting') if row['packet'] and ticket.get('kind') in ('post-start-tooling', *COMPANION_KINDS) else None
+            kind = {'post-start-tooling': 'post_start_tooling', 'companion-post-start-tooling': 'companion_post_start_tooling',
+                    'companion-pre-session': 'companion_pre_session'}.get(ticket.get('kind'), 'tooling_retry')
+            result.append({'id': row['id'], 'subjectOrderId': order['id'], 'attemptKind': kind,
                            'restartMode': ticket.get('restartMode'), 'launchAccounting': accounting,
                            'subject': order['subject'], 'mode': 'automatic', 'workflow': 'standard',
                            'origin': order['sourceChat'], 'status': 'delivered' if row['receipt'] else row['status'],

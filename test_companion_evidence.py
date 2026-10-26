@@ -354,7 +354,7 @@ class CompanionEvidenceTests(unittest.TestCase):
         self.retry_context = {'attemptId': self.attempt_id, 'folder': retry_root,
             'reviewPin': {key: review[key] for key in ('path', 'sha256')}}
         self.context = Mock(return_value=self.retry_context)
-        module_patch = patch.dict(sys.modules, {'companion_pretest_resume': SimpleNamespace(context=self.context)})
+        module_patch = patch('subject_companion_route.attempt_context', self.context)
         module_patch.start(); self.addCleanup(module_patch.stop)
         self.p.attempt_plan = Mock(return_value=self.frozen)
 

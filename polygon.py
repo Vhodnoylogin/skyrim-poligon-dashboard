@@ -1963,6 +1963,8 @@ def main(argv=None):
         sub.add_parser(command).add_argument('request', type=Path)
     sub.add_parser('companion-pretest-admit', help='Reviewed zero-native continuation hold transfer; does not launch').add_argument('request', type=Path)
     sub.add_parser('companion-pretest-run', help='Run the exact admitted zero-native companion attempt once').add_argument('id')
+    sub.add_parser('companion-poststart-admit', help='Reviewed prospective full-replay hold transfer; does not launch').add_argument('request', type=Path)
+    sub.add_parser('companion-poststart-run', help='Run the exact separately admitted companion replay once').add_argument('id')
     repair = sub.add_parser('companion-collection-repair', help='Reviewed additive collection for one ended failed attempt; never launches')
     repair.add_argument('id')
     repair.add_argument('review', type=Path)
@@ -1972,6 +1974,12 @@ def main(argv=None):
         if args.command == 'companion-collection-repair':
             from companion_collection_repair import record
             result = record(polygon, args.id, args.review)
+        elif args.command == 'companion-poststart-run':
+            from companion_post_start import run
+            result = run(polygon, args.id)
+        elif args.command == 'companion-poststart-admit':
+            from companion_post_start import admit
+            result = admit(polygon, args.request)
         elif args.command == 'companion-pretest-run':
             from companion_pretest_resume import run
             result = run(polygon, args.id)

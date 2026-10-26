@@ -237,15 +237,30 @@ def validate_core_overlaps(order, q, cfg, operator_pins):
 def attempt_context(p, order, attempt_id=None):
     if attempt_id is None:
         return {'attemptId': order['id'], 'folder': p.evidence_dir(order['id']), 'reviewPin': None}
-    from companion_pretest_resume import context
-    return context(p, order, attempt_id)
+    from tooling_retries import companion_protocol
+    protocol = companion_protocol(json.loads(p.retry_show(attempt_id)['request']))
+    if protocol is None: raise ValueError('Explicit companion attempt protocol required')
+    return protocol.context(p, order, attempt_id)
+
+
+def attempt_selection(p, order, selection, attempt_id):
+    if attempt_id is not None and json.loads(p.retry_show(attempt_id)['request']).get('kind') == 'companion-post-start-tooling':
+        from companion_post_start import effective_selection
+        return effective_selection(p, order, attempt_id, selection)
+    return selection
 
 
 def freeze(p, order, attempt_id=None):
     m = api(); selection = find(p, order); q, _, _, _ = baseline(p, selection)
-    cfg = configuration(p, order, selection, q); review = admission(p, order['id'])
+    effective = attempt_selection(p, order, selection, attempt_id)
+    cfg = configuration(p, order, effective, q); review = admission(p, order['id'])
     if not review: raise ValueError('Atomic companion admission required before preparation')
     context = attempt_context(p, order, attempt_id)
+    attempt_pins = []
+    if effective != selection:
+        from companion_post_start import registered, PINS
+        _, ticket, source_pin = registered(p, attempt_id)
+        attempt_pins = [source_pin, *(ticket[key] for key in PINS)]
     pins = []
     def add(value):
         path = pin(value); item = {'path': str(path), 'sha256': value['sha256']}
@@ -253,12 +268,15 @@ def freeze(p, order, attempt_id=None):
     for item in q['executorPins'] + q['pins']: add(item)
     for item in (selection['request'], selection['configuration'], selection['transport'], selection['baselinePacket'], review,
                  order['subjectPlan']['plan'], order['subjectPlan']['sequencer']): add(item)
+    add(effective['configuration'])
+    for item in attempt_pins: add(item)
     auth = selection['ownerAuthorization']; add({'path': auth['path'], 'sha256': auth['sha256']})
     for path in sorted(m.HERE.glob('*.py')): add({'path': str(path), 'sha256': m.digest(path)})
     for entry in cfg.get('staged_plugins', []): add({'path': entry['source'], 'sha256': entry['sha256']})
     if context['reviewPin']: add(context['reviewPin'])
-    operator_pins = [selection['request'], selection['configuration'], selection['transport'], review,
+    operator_pins = [selection['request'], selection['configuration'], effective['configuration'], selection['transport'], review,
                      {'path': auth['path'], 'sha256': auth['sha256']}]
+    operator_pins.extend(attempt_pins)
     operator_pins.extend({'path': str(path), 'sha256': m.digest(path)} for path in sorted(m.HERE.glob('*.py')))
     # The baseline config is a control-plane pin; its other input pins retain
     # their provenance hashes without becoming tool/provider declarations.
@@ -271,7 +289,11 @@ def freeze(p, order, attempt_id=None):
             'subjectCapabilitiesQualified': False, 'preparedAt': time.time()}
     if attempt_id is not None:
         plan['companionAttemptId'] = context['attemptId']
-        plan['companionPretestReview'] = context['reviewPin']
+        if effective != selection:
+            plan['companionPostStartReview'] = context['reviewPin']
+            plan['companionAttemptConfiguration'] = effective['configuration']
+        else:
+            plan['companionPretestReview'] = context['reviewPin']
     with p.connect() as con:
         con.execute('BEGIN IMMEDIATE')
         table = 'retry_attempts' if attempt_id is not None else 'jobs'
@@ -288,10 +310,15 @@ def verify(p, order, require_file=True, attempt_id=None):
     plan = p.attempt_plan(order, attempt_id) if attempt_id is not None else p.attempt_plan(order)
     if require_file and m.read(context['folder'] / 'platform-plan.json') != plan:
         raise ValueError('Companion platform plan changed')
+    original = find(p, order)
+    effective = attempt_selection(p, order, original, attempt_id)
+    review_key = 'companionPostStartReview' if effective != original else 'companionPretestReview'
     if attempt_id is not None and (plan.get('companionAttemptId') != context['attemptId'] or
-            plan.get('companionPretestReview') != context['reviewPin']):
-        raise ValueError('Companion pre-session attempt context changed')
-    if find(p, order) != plan['companionSelection'] or admission(p, order['id']) != plan['companionAdmission']:
+            plan.get(review_key) != context['reviewPin']):
+        raise ValueError('Companion attempt context changed')
+    if effective != original and plan.get('companionAttemptConfiguration') != effective['configuration']:
+        raise ValueError('Companion attempt configuration pin changed')
+    if original != plan['companionSelection'] or admission(p, order['id']) != plan['companionAdmission']:
         raise ValueError('Companion selection/admission changed')
     for entry in plan['pins']: pin(entry)
     from qualification import inventory

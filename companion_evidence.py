@@ -151,8 +151,8 @@ def _collect(p, order, run, attempt_id=None):
     else:
         _require(isinstance(attempt_id, str) and re.fullmatch(r'[a-z0-9][a-z0-9-]{0,79}', attempt_id) is not None,
                  'safe registered retry attempt required')
-        from companion_pretest_resume import context
-        selected = context(p, order, attempt_id)
+        from subject_companion_route import attempt_context
+        selected = attempt_context(p, order, attempt_id)
         _require(set(selected) == {'attemptId', 'folder', 'reviewPin'} and selected['attemptId'] == attempt_id and
                  _path(selected['folder']) == _path(p.local / 'retry-attempts' / attempt_id) and
                  set(selected['reviewPin']) == {'path', 'sha256'}, 'registered retry context differs')

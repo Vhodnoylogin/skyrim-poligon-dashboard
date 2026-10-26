@@ -178,6 +178,23 @@ class CompanionPretestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'dispatch claim'):
             self.p.execute_retry(self.p.retry_show(self.ticket['id']))
 
+    def test_historical_context_accepts_one_exact_successor_without_reauthorizing_old_dispatch(self):
+        self.admitted()
+        with self.p.connect() as con:
+            con.execute("UPDATE retry_attempts SET status='recorded' WHERE id=?", (self.ticket['id'],))
+            descendant = {'kind': 'companion-post-start-tooling', 'id': 'reviewed-next-attempt',
+                          'orderId': self.order['id'], 'previousAttemptId': self.ticket['id']}
+            con.execute("INSERT INTO retry_attempts(id,order_id,request,created,status) VALUES(?,?,?,2,'queued')",
+                        (descendant['id'], self.order['id'], json.dumps(descendant)))
+        self.assertEqual(resume.context(self.p, self.order, self.ticket['id'])['attemptId'], self.ticket['id'])
+        with self.assertRaisesRegex(ValueError, 'cannot branch'):
+            resume.predecessor(self.p, self.ticket, allow_current=False)
+        with self.p.connect() as con:
+            descendant['previousAttemptId'] = 'unrelated-ended-attempt'
+            con.execute('UPDATE retry_attempts SET request=? WHERE id=?', (json.dumps(descendant), descendant['id']))
+        with self.assertRaisesRegex(ValueError, 'cannot branch'):
+            resume.context(self.p, self.order, self.ticket['id'])
+
     def test_other_queued_work_or_prepared_qualification_retains_hold(self):
         self.register()
         with self.p.connect() as con:

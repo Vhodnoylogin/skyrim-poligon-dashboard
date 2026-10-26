@@ -158,8 +158,13 @@ def predecessor(p, ticket, allow_current=False):
         for table in ('attempts', 'platform_attempts'):
             require(not con.execute('SELECT id FROM ' + table + ' WHERE id=?', (order['id'],)).fetchone(),
                     'original native/platform attempt exists')
-        others = con.execute('SELECT id FROM retry_attempts WHERE order_id=? AND id!=?', (order['id'], ticket['id'])).fetchall()
-        require(not others, 'zero-native continuation cannot branch or follow another retry')
+        others = con.execute('SELECT id,request FROM retry_attempts WHERE order_id=? AND id!=?', (order['id'], ticket['id'])).fetchall()
+        descendants = [json.loads(other['request']) for other in others]
+        require(not others or allow_current and len(others) == 1 and
+                descendants[0].get('kind') == 'companion-post-start-tooling' and
+                descendants[0].get('previousAttemptId') == ticket['id'] and
+                descendants[0].get('orderId') == order['id'] and descendants[0].get('id') == others[0]['id'],
+                'zero-native continuation cannot branch or follow another retry')
     require(admission(p, order['id']) == ticket['previousAdmission'], 'original admission changed')
     selection = find(p, order)
     cfg = m.read(pin(selection['configuration']))

@@ -110,8 +110,9 @@ flags, must match exactly. The separate expanded binding policy is reviewed data
 whose installed metadata/admission/business behavior is under test; it is not
 declared qualified by an earlier Alvor/race probe. This route supports SE with
 explicit native New Game, no Root Builder or profile reuse, and one first solo
-attempt. Cycles, shared sessions and checkpoint reconnect are unsupported. The
-strict zero-native continuation below is the only supported subsequent attempt.
+attempt. Cycles, shared sessions and checkpoint reconnect are unsupported.
+Subsequent attempts use only the separately reviewed zero-native or post-start
+routes described below, according to the predecessor's actual execution.
 
 ## Reviewed atomic execution
 
@@ -275,3 +276,128 @@ observed running before cleanup and exited later must not be relabeled as normal
 close, a mod assertion failure or proof that the earlier metadata fault was caused
 by that exit. Correcting a future binding declaration supplies no extra launch
 authorization and does not change this failed attempt's evidence.
+
+## Reviewed full replay after the native-selector tooling failure
+
+`companion-post-start-tooling` is a dedicated continuation for the same immutable
+file-plan subject after its first native attempt factually started and ended with
+a verified tooling interruption. It is separate from `companion-pre-session` and
+generic `post-start-tooling`. It starts again from the original initial fixture;
+there is no checkpoint resume, old-session reconnect or replay of uncertain
+commands. The original job remains blocked, with its raw packet, collection
+supplement, registered final report and partial coverage unchanged.
+
+The predecessor must be the ended `companion-pre-session` attempt, with exactly
+one subject game start, verified restoration/archive, a verified collection-repair
+view and a registered final report proving factual subject start. Its projection
+must corroborate a tooling interruption without a subject mismatch. The repair
+does not reinterpret a later nonzero game exit as the cause of an earlier metadata
+failure. A subject assertion failure is ineligible for this route.
+
+Use a new, distinct ticket with exactly these fields:
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "companion-post-start-tooling",
+  "restartMode": "initial-fixture",
+  "id": "NEW-ATTEMPT-ID",
+  "orderId": "UNCHANGED-SUBJECT-ID",
+  "previousAttemptId": "ENDED-FIRST-ATTEMPT-ID",
+  "previousPacketSha256": "ACTUAL_ORIGINAL_RAW_PACKET_SHA256",
+  "previousReport": {"path": "ABSOLUTE_FINAL_REPORT", "sha256": "ACTUAL_SHA256"},
+  "technicalFailure": {"path": "ABSOLUTE_FAILURE_REVIEW", "sha256": "ACTUAL_SHA256"},
+  "launchAccounting": {"path": "ABSOLUTE_ACCOUNTING_REVIEW", "sha256": "ACTUAL_SHA256"},
+  "ownerAuthority": {"path": "ABSOLUTE_NEW_AUTHORITY", "sha256": "ACTUAL_SHA256"},
+  "companionSelection": {"path": "ABSOLUTE_ORIGINAL_SELECTION", "sha256": "ACTUAL_SHA256"},
+  "configuration": {"path": "ABSOLUTE_CORRECTED_CONFIGURATION", "sha256": "ACTUAL_SHA256"},
+  "repair": {"path": "ABSOLUTE_SELECTOR_REPAIR_REVIEW", "sha256": "ACTUAL_SHA256"},
+  "authorityReview": {
+    "verifiedBy": "independent accountable operator",
+    "reason": "Separately bounded full replay within independently verified actual owner scope",
+    "retryPermitted": true,
+    "postStartContinuationPermitted": true,
+    "fullReplayReviewed": true,
+    "preservePriorCoverage": true,
+    "previousAttemptBudgetConsumed": true,
+    "maxAdditionalAttempts": 1,
+    "subjectActualLaunchesBefore": 1,
+    "maximumSubjectActualLaunches": 2,
+    "historicalGlobalActualLaunches": null
+  }
+}
+```
+
+This is a schema example, not a usable ticket: replace every illustrative value
+with its actual identity, absolute external path and lower-case SHA256. The seven
+pin objects contain exactly `path` and `sha256`. The three IDs must be distinct
+safe Dashboard IDs. `previousPacketSha256` identifies the unchanged original raw
+packet, while `previousReport` identifies the registered repaired final report.
+
+The new `ownerAuthority` document has `state:"active"`, exactly this original
+subject in `orderIds`, the actual matching `ownerAuthorization` evidence and a
+separate finite future Unix `deadlineUtc` for this additional bounded attempt.
+Its pin differs from the predecessor's bounded authority document. Existing
+actual human authorization persists: the operator can independently verify this
+continuation from that instruction without a new approval flow. The predecessor's
+one-attempt budget and deadline remain consumed; the new document does not reopen
+or reset that ticket. Registration, admission and dispatch check the prospective
+deadline. Historical
+collection later verifies the retained authority without requiring it to remain
+unexpired. Accounting advances this subject from one consumed start to a maximum
+of two. Historical global start accounting remains `null`, not zero or a guessed
+total, and earlier evidence/coverage is never reset.
+
+The supporting documents carry the following pinned facts:
+
+| Document | Required contents |
+|---|---|
+| `technicalFailure` | `schemaVersion:1`, `classification:"confirmed-tooling-post-start-failure"`, original `orderId`, predecessor `attemptId`, exact `packetSha256`, `reportSha256`, `run`, true `subjectStarted`/`done`/`restored`/`collectionFinished`, `restoreErrors:[]`, nonempty `evidence` pins, `verifiedBy`, `reason`. The evidence must be in the predecessor packet and include its `state.json`, `result.json` and `steps.jsonl`. |
+| `launchAccounting` | `schemaVersion:1`, `scope:"same-immutable-order"`, original `orderId`, `previousAttemptId`, `previousPacketSha256`, `previousAttemptActualLaunches:1`, `subjectActualLaunchesBefore:1`, `historicalGlobalActualLaunches:null`, `verifiedBy`, `reason`. |
+| `repair` | `schemaVersion:1`, `kind:"companion-native-selector-repair"`, original `orderId`, `previousAttemptId`, `previousPacketSha256`, exact `originalConfiguration` and new `configuration` pins, predecessor `recordedSteps` pin, one-based `metadataStep`, complete current `operatorFiles` path/hash inventory, nonempty pinned `testEvidence`, `verifiedBy`, `reason`. |
+
+The only configuration changes are a fresh absolute `runtime` and the existing
+`morph_keys` binding's function, from `NiOverride.GetBodyMorphKeys` to
+`NiOverride.GetMorphKeys`. Its global scope, parameters
+`[objectreference,string]`, `string[]` return and read effect remain unchanged.
+Every other binding and configuration value must remain identical. The new
+runtime must be empty and must not overlap the previous, baseline or global
+runtime in either direction. The frozen executor, native providers, data client,
+origin order, plan, sequencer and oracle stay unchanged.
+
+Repair validation uses the predecessor's exact recorded `papyrus`/`describe`
+result for `NiOverride`, following the actual delivered `morph_keys` request and
+immediately preceding its recorded metadata refusal. The same frozen metadata
+validator must reject the original selector and accept the corrected selector
+from that recorded result. This is an offline declaration check; it is not a
+passed native call, completed business check or live qualification.
+
+1. `python polygon.py --root HOST continuation-register TICKET.json` registers
+   this distinct attempt while retaining the genuine predecessor fault hold.
+   `retry-register` rejects this post-start kind. Registration never launches.
+2. `python polygon.py --root HOST companion-poststart-admit REVIEW.json`
+   independently checks the predecessor/report, repair, current permission,
+   input/profile pins, ended identities and idle environment. Under the native
+   session mutex and one transaction it transfers only the genuine predecessor
+   hold to the new claimed attempt. Admission does not launch.
+3. `python polygon.py --root HOST companion-poststart-run NEW-ATTEMPT-ID`
+   rechecks the prospective authority and empty runtime, durably claims this
+   dispatch once and uses the ordinary common bootstrap for the full replay.
+   An existing dispatch/native marker refuses repetition; no automatic reticket,
+   third attempt or extra start follows an uncertain outcome.
+
+The exact admission review has `schemaVersion:1`,
+`kind:"operator-companion-post-start-admission"`, `attemptId`, registered
+`ticket:{path,sha256}`, actual matching `ownerAuthorization`, `verifiedBy`,
+`reason`, and these six true fields: `predecessorFinalReportReviewed`,
+`restorationReviewed`, `archiveReviewed`, `repairReviewed`, `fullReplayReviewed`,
+`additionalStartReviewed`.
+
+The new attempt has its own runtime, helper evidence, packet and final report.
+Native order metadata retains the original subject ID with the new `attemptId`
+and original `subjectOrderId`; machine-action sessions and fixture witnesses are
+fresh for that run. Packet `attemptKind` is `companion_post_start_tooling`, with
+`restartMode:"initial-fixture"`, predecessor attempt/report identities and actual
+additional-start accounting of zero or one. A native admission without a result
+cannot be assumed to mean zero starts. Restoration, archive/collection, actual
+per-case assertions and exact-origin final-report gates remain mandatory.
