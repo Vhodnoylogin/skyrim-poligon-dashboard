@@ -251,3 +251,14 @@ separately, including retry attempts. Requested data and all completion,
 restoration, collection, final-report and exact-origin notification gates remain.
 Existing final reports, packets, orders and deliveries are never rewritten or
 resent to add this classification.
+
+
+## Observation-log shape diagnostics
+
+Collector self-checks retain observationShapeDiagnostics with source, line and
+actual type. Observation wrappers must be arrays of objects. The shutdown event's
+nonnegative integer observations count is metadata; it is recorded as information
+and does not suppress actual Observer samples. Unexpected malformed wrappers,
+items or query shapes remain explicit collector findings. A parser repair can
+collect an already ended/restored run without editing raw logs/results, replaying
+gameplay or changing subject assertions.

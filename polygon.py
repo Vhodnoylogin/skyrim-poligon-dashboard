@@ -1304,6 +1304,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             except (KeyError, OSError, ValueError) as error:
                 findings.append({"component": "skyrim-autotest", "kind": "profile_archive_unverified", "details": str(error), "confirmed": True})
         observer_samples = []
+        observation_diagnostics = []
         sources = ([Path(run) / "steps.jsonl"] if run else []) + [folder / "observations.jsonl"]
         def quality(value, path="", depth=0):
             if depth > 20:
@@ -1322,17 +1323,19 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             return flags
         for source in sources:
             if not source.exists(): continue
-            for line in source.read_text(encoding="utf-8").splitlines():
-                try: event = json.loads(line)
-                except ValueError: continue
-                candidates = [event] + event.get("observations", [])
-                for item in candidates:
-                    query = item.get("query", item)
-                    if query.get("args", {}).get("kind") == "world_observer":
-                        response = item.get("response", item.get("result"))
-                        observer_samples.append({"at": item.get("at", event.get("at")), "response": response, "qualityFlags": quality(response)})
+            from observation_log import parse
+            samples, diagnostics = parse(source.read_text(encoding="utf-8"), source)
+            observation_diagnostics.extend(diagnostics)
+            for sample in samples:
+                sample['qualityFlags'] = quality(sample['response'])
+                observer_samples.append(sample)
+        for diagnostic in observation_diagnostics:
+            if diagnostic['severity'] == 'error':
+                findings.append({'component':'collector', 'kind':'malformed_observation_log',
+                                 'details':diagnostic, 'confirmed':True})
         # This report is deliberately separate from mod acceptance or diagnosis.
         write(folder / "self-checks.json", {"checkedAt": time.time(), "findings": findings, "observerSamples": observer_samples,
+              "observationShapeDiagnostics": observation_diagnostics,
               "observerReview": "Review collected responses for capability/version, identity, phase, unavailable fields, gaps and drops. Unsupported coverage is not automatically a bug.",
               "subjectAnalysis": None})
         return findings
