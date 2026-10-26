@@ -4,12 +4,80 @@ This route admits subject capabilities under test; it never relabels the
 baseline's core lifecycle evidence as qualification of those capabilities.
 """
 from __future__ import annotations
+import errno
 import json
 from pathlib import Path, PureWindowsPath
 import subprocess
 import sys
 import threading
 import time
+import traceback
+
+LIVE_STATE_BYTES = 32 * 1024 * 1024
+STATE_READ_SECONDS = .75
+STATE_READ_ATTEMPTS = 16
+
+
+class _PollingStopped(Exception):
+    pass
+
+
+def _read_live_state(path, runs, stop, deadline):
+    """Retry only this owned runtime's mutable state, never pinned evidence."""
+    path, runs = Path(path).resolve(), Path(runs).resolve()
+    if path.name != 'state.json' or path.parent.parent != runs:
+        raise ValueError('Live-state reader requires exact runtime/runs/RUN/state.json')
+    end = min(deadline, time.monotonic() + STATE_READ_SECONDS)
+    last_error = None
+    for attempt in range(1, STATE_READ_ATTEMPTS + 1):
+        if stop.is_set(): raise _PollingStopped()
+        if time.monotonic() >= end:
+            if last_error is not None: raise last_error
+            raise TimeoutError('Live-state read deadline expired')
+        try:
+            with path.open('rb') as stream:
+                raw = stream.read(LIVE_STATE_BYTES + 1)
+        except PermissionError as error:
+            if error.errno != errno.EACCES and getattr(error, 'winerror', None) not in (5, 32, 33):
+                raise
+            error.state_read_attempts = attempt
+            error.state_read_operation = 'read-live-state'
+            error.state_read_path = str(path)
+            last_error = error
+            remaining = end - time.monotonic()
+            if attempt == STATE_READ_ATTEMPTS or remaining <= 0: raise
+            if stop.wait(min(.05, remaining)): raise _PollingStopped()
+            continue
+        if stop.is_set(): raise _PollingStopped()
+        if time.monotonic() >= end: raise TimeoutError('Live-state read deadline expired')
+        if len(raw) > LIVE_STATE_BYTES: raise ValueError('Live state exceeds its size bound')
+        def pairs(items):
+            result = {}
+            for key, value in items:
+                if key in result: raise ValueError('Duplicate live-state JSON field')
+                result[key] = value
+            return result
+        def invalid(value): raise ValueError('Nonfinite live-state JSON token: ' + value)
+        return json.loads(raw.decode('utf-8-sig'), object_pairs_hook=pairs, parse_constant=invalid)
+    raise last_error
+
+
+def _matching_live_runs(order, runtime, context, attempt_id, stop, deadline):
+    matches = []; runs = Path(runtime) / 'runs'
+    for path in runs.glob('*/state.json'):
+        state = _read_live_state(path, runs, stop, deadline)
+        if not isinstance(state, dict) or not isinstance(state.get('order'), dict):
+            raise ValueError('Malformed native live-state identity')
+        if state['order'].get('id') != order['id']: continue
+        if state.get('id') != path.parent.name:
+            raise ValueError('Companion native run/directory identity mismatch')
+        if attempt_id is not None and (state['order'].get('attemptId') != context['attemptId'] or
+                                      state['order'].get('subjectOrderId') != order['id']):
+            raise ValueError('Companion native attempt identity differs; no old-run adoption')
+        if attempt_id is None and state['order'].get('attemptId') is not None:
+            raise ValueError('First companion attempt cannot adopt a retry run')
+        matches.append((path, state))
+    return matches
 
 
 def api():
@@ -453,26 +521,17 @@ def run(p, order, plan, runner, attempt_id=None):
             type(worker['pid']) is not int or worker['pid'] <= 0 or
             type(worker['birth']) is not int or worker['birth'] <= 0 or not worker['path']):
         raise ValueError('Exact companion/native worker identity required before launch')
-    stop = threading.Event(); outcome = {}
+    stop = threading.Event(); admission_lock = threading.Lock(); outcome = {}
     def companion():
         try:
             end = time.monotonic() + 600
             while not stop.is_set() and time.monotonic() < end:
-                if attempt_id is None:
-                    matches = p.matching_runs(order)
-                else:
-                    matches = []
-                    for state_path in (Path(plan['configuration']['runtime']) / 'runs').glob('*/state.json'):
-                        candidate = m.read(state_path)
-                        if candidate.get('order', {}).get('id') == order['id']:
-                            if (candidate['order'].get('attemptId') != context['attemptId'] or
-                                    candidate['order'].get('subjectOrderId') != order['id']):
-                                raise ValueError('Companion native attempt identity differs; no old-run adoption')
-                            matches.append((state_path, candidate))
+                matches = _matching_live_runs(order, plan['configuration']['runtime'], context, attempt_id, stop, end)
                 if len(matches) > 1: raise ValueError('Multiple native runs for one companion subject')
                 if matches:
                     _, state = matches[0]
                     if state.get('runner') != worker: raise ValueError('Companion native worker identity mismatch')
+                    if state.get('done') or stop.is_set(): return
                     if state.get('interactiveSession', {}).get('ready') is True:
                         spec = order['subjectPlan']; selection = plan['companionSelection']
                         args = [sys.executable, str(pin(selection['transport'])), '--executor', plan['executor'],
@@ -485,10 +544,13 @@ def run(p, order, plan, runner, attempt_id=None):
                                 '--maximum-seconds', str(spec['maximumSeconds'])]
                         record = {'argv': args, 'source': selection['transport'], 'identity': None,
                                   'timedOut': False, 'terminatedOwnedClient': False, 'returncode': None, 'exit': None}
-                        outcome['client'] = record
                         with (output / 'client.log').open('x', encoding='utf-8') as log:
-                            child = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT,
-                                                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), shell=False)
+                            with admission_lock:
+                                if stop.is_set(): return
+                                if time.monotonic() >= end: raise TimeoutError('Client admission deadline expired')
+                                child = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT,
+                                                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), shell=False)
+                                outcome['client'] = record
                             tracker = None
                             try:
                                 record['identity'], tracker = _retain_client(child)
@@ -510,11 +572,16 @@ def run(p, order, plan, runner, attempt_id=None):
                                     try: record['exit'] = tracker.snapshot()
                                     finally: record['handleClose'] = tracker.close()
                         return
-                    if state.get('done'): return
                 stop.wait(.1)
             if not stop.is_set(): raise TimeoutError('Owned interactive readiness did not arrive within startup bound')
+        except _PollingStopped:
+            return
         except Exception as error:
             outcome['error'] = type(error).__name__ + ': ' + str(error)
+            outcome['errorDetails'] = {'operation': getattr(error, 'state_read_operation', 'companion-readiness-or-client'),
+                'path': getattr(error, 'state_read_path', getattr(error, 'filename', None)),
+                'errno': getattr(error, 'errno', None), 'winerror': getattr(error, 'winerror', None),
+                'stateReadAttempts': getattr(error, 'state_read_attempts', None), 'traceback': traceback.format_exc()}
         finally:
             m.write(output / 'dispatch.json', {'schemaVersion': 1, 'orderId': order['id'], 'worker': worker, **outcome})
     thread = threading.Thread(target=companion, name='subject-companion', daemon=True); thread.start()
@@ -527,6 +594,7 @@ def run(p, order, plan, runner, attempt_id=None):
             profile = p.source_profile(order, runner, output_dir=folder)
         return runner.run(profile, folder / 'scenario.json', restart_idle_mo2=True, order=native_order)
     finally:
-        stop.set(); thread.join(timeout=order['subjectPlan']['maximumSeconds'] + 65)
+        with admission_lock: stop.set()
+        thread.join(timeout=order['subjectPlan']['maximumSeconds'] + 65)
         if thread.is_alive(): raise ValueError('Companion did not settle; preserve native/session barrier')
         m.write(output / 'dispatch.json', {'schemaVersion': 1, 'orderId': order['id'], 'worker': worker, **outcome})

@@ -374,7 +374,7 @@ class CompanionRouteTests(unittest.TestCase):
         worker = {'pid': 888, 'birth': 999, 'path': 'offline-current-worker'}
         game = {'pid': 222, 'birth': 333, 'path': 'offline-current-game'}
         ready, exchanged = threading.Event(), threading.Event()
-        state = {'id': 'fresh', 'runner': worker, 'game': game, 'interactiveSession': {'ready': True}}
+        state = {'id': 'fresh', 'order': {'id': self.order['id']}, 'runner': worker, 'game': game, 'interactiveSession': {'ready': True}}
         plan = {'executor': str(self.executor), 'configuration': self.cfg, 'pins': inventory(self.executor),
                 'companionSelection': {'transport': self.pin(self.transport)}}
         native = SimpleNamespace(identity=lambda pid: worker)
@@ -382,7 +382,8 @@ class CompanionRouteTests(unittest.TestCase):
         def owned_run(profile, scenario_path, **kwargs):
             self.assertEqual(threading.get_ident(), main_thread)
             self.assertEqual(profile, self.order['profile']); self.assertTrue(kwargs['restart_idle_mo2'])
-            ready.set(); self.assertTrue(exchanged.wait(3)); return 0
+            ready.set(); m.write(Path(self.cfg['runtime']) / 'runs/fresh/state.json', state)
+            self.assertTrue(exchanged.wait(3)); return 0
         runner = SimpleNamespace(native=native, run=owned_run)
         def client(args, **kwargs):
             self.assertTrue(ready.is_set()); self.assertFalse(kwargs['shell'])
@@ -398,8 +399,7 @@ class CompanionRouteTests(unittest.TestCase):
             return child
         tracker = SimpleNamespace(snapshot=lambda: {'identityVerified': True, 'status': 'exited', 'exitCode': 0}, close=lambda: {'closeConfirmed': True})
         folder = self.p.evidence_dir(self.order['id']); folder.mkdir(parents=True)
-        with (patch.object(self.p, 'matching_runs', side_effect=lambda _: [(self.root / 'state.json', state)] if ready.is_set() else []),
-              patch.object(self.p, 'source_profile', return_value=self.order['profile']),
+        with (patch.object(self.p, 'source_profile', return_value=self.order['profile']),
               patch.object(route.subprocess, 'Popen', side_effect=client),
               patch.object(route, '_retain_client', return_value=({'pid': 500, 'birth': 501, 'path': 'own-client'}, tracker))):
             self.assertEqual(route.run(self.p, self.order, plan, runner), 0)
@@ -426,7 +426,7 @@ class CompanionRouteTests(unittest.TestCase):
         worker = {'pid': 888, 'birth': 999, 'path': 'offline-worker'}
         game = {'pid': 222, 'birth': 333, 'path': 'offline-game'}
         client_ident = {'pid': 500, 'birth': 501, 'path': 'offline-client'}
-        state = {'id': 'fresh', 'runner': worker, 'game': game, 'interactiveSession': {'ready': True}}
+        state = {'id': 'fresh', 'order': {'id': self.order['id']}, 'runner': worker, 'game': game, 'interactiveSession': {'ready': True}}
         plan = {'executor': str(self.executor), 'configuration': self.cfg, 'pins': inventory(self.executor),
                 'companionSelection': {'transport': self.pin(self.transport)}}
         finished = threading.Event(); child = Mock(pid=500, returncode=None)
@@ -437,11 +437,12 @@ class CompanionRouteTests(unittest.TestCase):
         tracker = Mock()
         tracker.snapshot.return_value = {'identityVerified': True, 'identity': client_ident, 'status': 'exited', 'exitCode': 7, 'exitCodeHex': '0x00000007'}
         tracker.close.return_value = {'closeConfirmed': True}
-        runner = SimpleNamespace(native=SimpleNamespace(identity=lambda pid: worker),
-                                 run=lambda *args, **kwargs: 0 if finished.wait(3) else self.fail('No bounded client finish'))
+        def owned_run(*args, **kwargs):
+            m.write(Path(self.cfg['runtime']) / 'runs/fresh/state.json', state)
+            return 0 if finished.wait(3) else self.fail('No bounded client finish')
+        runner = SimpleNamespace(native=SimpleNamespace(identity=lambda pid: worker), run=owned_run)
         folder = self.p.evidence_dir(self.order['id']); folder.mkdir(parents=True)
-        with (patch.object(self.p, 'matching_runs', return_value=[(self.root / 'state.json', state)]),
-              patch.object(self.p, 'source_profile', return_value=self.order['profile']),
+        with (patch.object(self.p, 'source_profile', return_value=self.order['profile']),
               patch.object(route.subprocess, 'Popen', return_value=child),
               patch.object(route, '_retain_client', return_value=(client_ident, tracker))):
             self.assertEqual(route.run(self.p, self.order, plan, runner), 0)
