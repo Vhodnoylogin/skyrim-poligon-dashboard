@@ -167,6 +167,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         self.init_qualifications()
         import order_platform
         order_platform.init(self)
+        import subject_companion_route
+        subject_companion_route.init(self)
 
     @contextlib.contextmanager
     def connect(self):
@@ -638,10 +640,12 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             self.validate_testing(order.get("testing"))
             if order.get("testing") is None:
                 raise ValueError("Schema2 requires factual testing boundary and checks")
-            names = {s["name"] for s in order["subjectPlan"]["steps"]}
+            names = subject_contract.checkpoint_names(order['subjectPlan'])
             testing = order["testing"]
             if testing["start"].get("kind") != "check" or not testing.get("checks") or testing["start"].get("name") not in names or any(c["name"] not in names for c in testing["checks"]):
                 raise ValueError("Testing boundary/checks must name subject plan checkpoints")
+            import subject_companion_route
+            subject_companion_route.normalize_subject(order, path)
         for key in ("subject", "sourceChat", "sourceThreadId", "profile", "purpose"):
             required_string(order, key)
         if order.get("mode") not in ("automatic", "assisted"):
@@ -663,6 +667,10 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         if modern:
             if not any(p["role"] == "subject" for p in pins):
                 raise ValueError("Pin at least one actual subject file")
+            if subject_companion_route.selected(order):
+                for key in ('plan', 'sequencer'):
+                    if {**order['subjectPlan'][key], 'role': 'fixture'} not in pins:
+                        raise ValueError('Origin plan and sequencer must also be explicit fixture inputs')
         elif order["mode"] == "automatic":
             config = (path.parent / required_string(order, "config")).resolve()
             from_location, validate = self.executor()
@@ -733,6 +741,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                     if slot and (slot["status"] == "blocked" or slot["order_id"] != candidate["id"]):
                         continue
                     request = json.loads(candidate["request"])
+                    if request.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
+                        continue  # Only reviewed atomic companion-execute can claim a file plan.
                     if con.execute('SELECT id FROM operator_platform_bindings WHERE order_id=?',(candidate['id'],)).fetchone():
                         continue  # Only reviewed atomic execute-bound admits these orders.
                     if request.get("cycle") is not None or con.execute("SELECT id FROM released_orders WHERE id=?", (candidate["id"],)).fetchone():
@@ -872,6 +882,20 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         result = read(result_path) if result_path and result_path.resolve() in pinned_paths else {}
         actual = result.get("checks") or []
         auxiliary = self.executor_auxiliary_checks(order, packet, result, actual, pinned_paths)
+        companion_started = None
+        if order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
+            # Keep core readiness in its own tooling projection; never rewrite raw checks.
+            auxiliary = [{**c, 'provenance': c.get('provenance', {'component': 'skyrim-autotest', 'stage': 'preparation'})}
+                         for c in actual]
+            try:
+                from companion_evidence import projection
+                companion = projection(self, order, packet)
+                actual, companion_started = companion['checks'], companion['subjectStarted']
+                if companion['uncertain'] or not companion['completed']:
+                    auxiliary.append({'name': 'subject-companion-transport', 'result': 'failed', 'provenance': {'component': 'subject-companion'}})
+            except (OSError, ValueError, KeyError, TypeError):
+                actual, companion_started = [], False
+                auxiliary.append({'name': 'subject-companion-evidence', 'result': 'failed', 'provenance': {'component': 'subject-companion'}})
         shared = packet.get("sharedSession")
         if shared:
             names = shared["checkNames"]
@@ -904,6 +928,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                     started = any(s.get("query") == start["query"] and s.get("response") is not None
                                   for e in events for s in e.get("observations", []))
         plan = (testing or {}).get("checks", [])
+        if companion_started is not None:
+            started = companion_started
         coverage = []
         for check in plan:
             matches = [c for c in actual if c.get("name") == check["name"]]
@@ -1090,6 +1116,10 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         pins = [{"path": str(p), "sha256": digest(p)} for p in sorted((self.executor()[0] / "skyrim_autotest").iterdir()) if p.is_file() and p.suffix in (".py", ".h", ".json")]
         return pins
 
+    def verify_companion_processes_dead(self, order, identities):
+        from subject_companion_route import verify_processes_dead
+        return verify_processes_dead(self, order, identities)
+
     def attempt_plan(self, order, attempt_id=None):
         key = attempt_id or order["id"]
         with self.connect() as con:
@@ -1109,6 +1139,10 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             existing = con.execute("SELECT id FROM platform_attempts WHERE id=?", (platform_key,)).fetchone()
         if existing:
             return self.verify_platform(order, attempt_id=attempt_id)
+        if order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
+            if attempt_id: raise ValueError('File-plan retries/sharing require a separate supported contract')
+            from subject_companion_route import freeze
+            return freeze(self, order)
         import order_platform
         selection = order_platform.find(self, order, attempt_id)
         manifest_path = Path(selection["manifestPath"] if selection else required_string(self.host(), "platformManifest")).resolve()
@@ -1203,6 +1237,10 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         return self.verify_platform(order, attempt_id=attempt_id)
 
     def verify_platform(self, order, require_file=True, attempt_id=None):
+        if order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
+            if attempt_id: raise ValueError('File-plan retry attempt is unsupported')
+            from subject_companion_route import verify
+            return verify(self, order, require_file)
         plan = self.attempt_plan(order, attempt_id)
         folder = self.local / "retry-attempts" / attempt_id if attempt_id else self.evidence_dir(order["id"])
         if require_file and read(folder / "platform-plan.json") != plan:
@@ -1280,12 +1318,20 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             if result.get("restored") is not True or result.get("restoreErrors"):
                 findings.append({"component": "skyrim-autotest", "kind": "restoration_unverified", "details": result.get("restoreErrors"), "confirmed": True})
         order = json.loads(self.get(job)["request"])
+        if run and order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
+            try:
+                from companion_evidence import collect
+                companion = collect(self, order, run)
+                if not companion['completed'] or companion['uncertain']:
+                    raise ValueError('Companion completion is unavailable or a native outcome is uncertain')
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                findings.append({'component': 'subject-companion', 'kind': 'companion_evidence_unverified', 'details': str(error), 'confirmed': True})
         if order.get("schemaVersion") == 2 and not (run is None and self.unprepared_order(job)):
             try:
                 self.verify_platform(order)
             except (OSError, ValueError) as error:
                 findings.append({"component": "platform", "kind": "changed_build", "details": str(error), "confirmed": True})
-        if order.get("cycle"):
+        if order.get("cycle") or order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
             try:
                 if not run:
                     raise ValueError("No run lifecycle evidence")
@@ -1386,12 +1432,22 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                     files.append({"path": str(p), "sha256": digest(p), "bytes": p.stat().st_size})
         if run:
             files.extend(raw_evidence_pins(run))
+        companion_summary = None
+        if run and order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
+            try:
+                from companion_evidence import collect
+                companion_summary = collect(self, order, run)
+                for entry in companion_summary['pins']:
+                    if entry not in files: files.append(entry)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass  # self_checks already retained the concrete fault and dispatch hold.
         packet = {"schemaVersion": 1, "orderId": job, "mode": order["mode"],
                   "sourceChat": order["sourceChat"], "sourceThreadId": order["sourceThreadId"],
                   "subject": order["subject"], "executionOutcome": outcome,
                   "reason": note, "runDirectory": str(run) if run else None,
                   "restored": restored, "files": files, "requestedData": order["collect"],
                   "analysis": None, "finishedAt": time.time()}
+        if companion_summary is not None: packet['subjectCompanion'] = companion_summary
         shared_path = folder / "shared-session.json"
         if shared_path.exists():
             packet["sharedSession"] = read(shared_path)
@@ -1508,7 +1564,13 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         for pin in read(self.evidence_dir(job) / "executor-pins.json"):
             if digest(pin["path"]) != pin["sha256"]:
                 raise ValueError("Executor changed after claim")
-        if order.get("schemaVersion") == 2 and plan.get("operatorSelection"):
+        if order.get('schemaVersion') == 2 and plan.get('companionSelection'):
+            import subject_companion_route
+            import order_platform
+            if subject_companion_route.admission(self, order['id']) != plan['companionAdmission']:
+                raise ValueError('Exact atomic companion admission required before native dispatch')
+            runner = order_platform.activate(plan['executor'])
+        elif order.get("schemaVersion") == 2 and plan.get("operatorSelection"):
             import order_platform
             if not plan.get('operatorAdmission') or order_platform.admission(self, order['id']) != plan['operatorAdmission']:
                 raise ValueError('Exact atomic operator admission is required before native dispatch')
@@ -1518,6 +1580,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             from skyrim_autotest import runner
         from skyrim_autotest.config import load
         runner.configure(load(self.evidence_dir(job) / "config.json"))
+        if order.get('schemaVersion') == 2 and plan.get('companionSelection'):
+            return subject_companion_route.run(self, order, plan, runner)
         return runner.run(self.source_profile(order, runner), self.evidence_dir(job) / "scenario.json",
                           restart_idle_mo2=True, order={"id": job, "owner": order["sourceChat"]})
 
@@ -1897,10 +1961,15 @@ def main(argv=None):
         sub.add_parser(name).add_argument("id")
     for command in ('platform-bind', 'execute-bound'):
         sub.add_parser(command).add_argument('request', type=Path)
+    for command in ('companion-bind', 'companion-execute'):
+        sub.add_parser(command).add_argument('request', type=Path)
     args = parser.parse_args(argv)
     try:
         polygon = Polygon(session_root(args.root))
-        if args.command in ('platform-bind', 'execute-bound'):
+        if args.command in ('companion-bind', 'companion-execute'):
+            import subject_companion_route
+            result = (subject_companion_route.register if args.command == 'companion-bind' else subject_companion_route.execute)(polygon, args.request)
+        elif args.command in ('platform-bind', 'execute-bound'):
             import order_platform
             result = (order_platform.register if args.command == 'platform-bind' else order_platform.execute)(polygon, args.request)
         elif args.command == "submit": result = polygon.submit(args.order)

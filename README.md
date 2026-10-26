@@ -132,6 +132,11 @@ and verifies a separately qualified platform plan for each attempt. A tool updat
 does not require a new queued mod order or a new mod build. Unsupported/unqualified
 platforms refuse preparation honestly. No tool change grants another launch.
 
+For a finite origin-authored machine-oracle plan over the unchanged owned SE
+interactive executor, see [ordinary subject companions](docs/subject-companion.md).
+This separate explicit route preserves core baseline evidence and keeps expanded
+subject capabilities under test; normal queue dispatch cannot launch these plans.
+
 ## Retained schemaVersion1 orders
 
 The following is the original format for compatibility, assisted orders and

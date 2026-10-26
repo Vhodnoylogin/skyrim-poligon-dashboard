@@ -10,6 +10,7 @@ import math
 import re
 
 INTERFACE = "polygon-actions/1"
+FILE_INTERFACE = "polygon-file-plan/1"
 MAX_SUBJECT_STEPS = 512
 OPERATIONS = {
     "state.read": set(), "player.read": set(), "world.read": {"request"},
@@ -38,6 +39,8 @@ def build_hashes(order):
 
 
 def validate(plan):
+    if isinstance(plan, dict) and plan.get('interface') == FILE_INTERFACE:
+        return validate_file_plan(plan)
     if not isinstance(plan, dict) or set(plan) != {"interface", "fixture", "steps"} or plan["interface"] != INTERFACE:
         raise ValueError("Subject plan needs polygon-actions/1, fixture and steps only")
     fixture = plan["fixture"]
@@ -104,9 +107,40 @@ def validate(plan):
     identity(plan)  # Reject non-JSON and non-finite domain values.
 
 
+def validate_file_plan(plan):
+    if set(plan) != {'interface', 'fixture', 'plan', 'sequencer', 'checks', 'maximumSeconds'}:
+        raise ValueError('File plan requires exact fixture, plan/sequencer pins, checks and finite window')
+    if (type(plan['fixture']) is not dict or set(plan['fixture']) != {'cell', 'startMode'} or
+            plan['fixture']['startMode'] != 'new-game' or not isinstance(plan['fixture']['cell'], str) or
+            not re.fullmatch(r'[A-Za-z0-9_]+', plan['fixture']['cell'])):
+        raise ValueError('File plan requires a new-game cell fixture')
+    for name in ('plan', 'sequencer'):
+        pin = plan[name]
+        if (type(pin) is not dict or set(pin) != {'path', 'sha256'} or
+                not isinstance(pin['path'], str) or not pin['path'] or
+                not re.fullmatch(r'[0-9a-f]{64}', pin.get('sha256', ''))):
+            raise ValueError('File plan requires exact source pins')
+    checks = plan['checks']
+    if (not isinstance(checks, list) or not 1 <= len(checks) <= MAX_SUBJECT_STEPS or
+            any(not isinstance(x, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', x) for x in checks) or
+            len(set(checks)) != len(checks)):
+        raise ValueError('File plan requires unique bounded case IDs')
+    if 'companion-core-preparation' in checks:
+        raise ValueError('Core preparation cannot be a subject case ID')
+    if type(plan['maximumSeconds']) is not int or not 1 <= plan['maximumSeconds'] <= 1200:
+        raise ValueError('File plan requires a maximum window in 1..1200 seconds')
+    identity(plan)
+
+
+def checkpoint_names(plan):
+    return set(plan['checks']) if plan.get('interface') == FILE_INTERFACE else {s['name'] for s in plan['steps']}
+
+
 def compile_plan(plan, operations):
     """Translate semantics through a separately qualified mapping, never a mod-name branch."""
     validate(plan)
+    if plan.get('interface') == FILE_INTERFACE:
+        raise ValueError('File plans require the separate explicit companion route')
     fixture = plan["fixture"]
     result = {"schemaVersion": 1, "steps": []}
     for key in ("cell", "startMode"):
