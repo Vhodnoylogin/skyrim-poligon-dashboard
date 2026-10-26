@@ -158,7 +158,14 @@ def configuration(p, order, selection, q):
     m = api(); cfg = isolated_config(selection['executor'], pin(selection['configuration']), scenario(order))
     if cfg.get('game_edition') != 'se' or cfg.get('se_new_game_ui') is not True or cfg.get('root_builder') or cfg.get('reuse_test_profile'):
         raise ValueError('Companion supports one cold-owned initialized SE game only')
-    old = q['configuration']
+    # Qualification stores the original JSON, whereas config.load supplies
+    # defaults and resolves paths relative to that file. Normalize both inputs
+    # through the same frozen loader, retaining the original pinned base path.
+    baseline_path = Path(q['configPath']).resolve()
+    baseline_pins = [x for x in q['pins'] if Path(x['path']).resolve() == baseline_path]
+    if len(baseline_pins) != 1 or m.read(pin(baseline_pins[0])) != q['configuration']:
+        raise ValueError('Exact pinned raw baseline configuration required')
+    old = isolated_config(selection['executor'], baseline_path, scenario(order))
     delta = {'runtime', 'interactive_session'}
     if {k: v for k, v in cfg.items() if k not in delta} != {k: v for k, v in old.items() if k not in delta}:
         raise ValueError('Core baseline configuration changed outside runtime/interactive subject data')

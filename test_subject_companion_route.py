@@ -71,8 +71,10 @@ class CompanionRouteTests(unittest.TestCase):
         m.write(self.packetfile, self.packet)
         old_cfg = copy.deepcopy(self.cfg); old_cfg['runtime'] = str(self.root / 'baseline-runtime')
         old_cfg['interactive_session']['nativeBindings'] = {'fixtureActorBases': ['old-alvor'], 'bindings': ['race']}
+        self.baseline_config = self.root / 'baseline' / 'runner-config.json'; m.write(self.baseline_config, old_cfg)
         self.qplan = {'executor': str(self.executor), 'executorPins': inventory(self.executor), 'configuration': old_cfg,
-                      'pins': [self.pin(self.provider)], 'ownerAuthorization': {**self.auth, 'messageId': 'older-baseline-human'}}
+                      'configPath': str(self.baseline_config), 'pins': [self.pin(self.provider), self.pin(self.baseline_config)],
+                      'ownerAuthorization': {**self.auth, 'messageId': 'older-baseline-human'}}
         qfolder = self.p.local / 'qualifications' / self.qid
         m.write(qfolder / 'worker.json', {'identity': self.worker}); m.write(qfolder / 'child-exit.json', {'returncode': 0})
         with self.p.connect() as con:
@@ -163,6 +165,41 @@ class CompanionRouteTests(unittest.TestCase):
             m.write(self.requestfile, request)
             with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, 'baseline|Baseline'):
                 self.bind()
+
+    def test_both_raw_inputs_use_same_frozen_loader_defaults_and_original_path_base(self):
+        loader = self.executor / 'skyrim_autotest/config.py'
+        loader.write_text('import json\nfrom pathlib import Path\ndef load(p):\n'
+            ' p=Path(p).resolve();v=json.loads(p.read_text(encoding="utf-8-sig"))\n'
+            ' for k,d in [("extra_files",[]),("collected_files",[]),("subject_state_bindings",{}),("fixture_dir",None)]: v.setdefault(k,d)\n'
+            ' v["game"]=str((p.parent/v["game"]).resolve())\n'
+            ' return v\n')
+        original = copy.deepcopy(self.qplan['configuration'])
+        original['game'] = '../game'
+        m.write(self.baseline_config, original)
+        self.qplan.update(configuration=original, pins=[self.pin(self.provider), self.pin(self.baseline_config)])
+        proposed = copy.deepcopy(self.cfg)
+        proposed.update(extra_files=[], collected_files=[], subject_state_bindings={}, fixture_dir=None)
+        m.write(self.config, proposed)
+        selection = {**self.request, 'configuration': self.pin(self.config)}
+        before = self.baseline_config.read_bytes()
+        normalized = route.configuration(None, self.order, selection, self.qplan)
+        self.assertEqual(normalized, proposed)
+        self.assertEqual(self.baseline_config.read_bytes(), before)
+        self.assertEqual(self.qplan['configuration'], original)
+        # Default insertion cannot hide a real extra snapshot or core flag.
+        for changed in (dict(proposed, extra_files=['new-file']), dict(proposed, allow_owned_save_load=True)):
+            m.write(self.config, changed); selection['configuration'] = self.pin(self.config)
+            with self.assertRaisesRegex(ValueError, 'Core baseline'):
+                route.configuration(None, self.order, selection, self.qplan)
+
+    def test_baseline_normalization_requires_exact_raw_file_and_qualification_pin(self):
+        for changed in ('missing-pin', 'changed-pin', 'raw-snapshot-mismatch'):
+            q = copy.deepcopy(self.qplan)
+            if changed == 'missing-pin': q['pins'] = [self.pin(self.provider)]
+            if changed == 'changed-pin': q['pins'][-1]['sha256'] = '0' * 64
+            if changed == 'raw-snapshot-mismatch': q['configuration']['extra_files'] = []
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                route.configuration(None, self.order, self.request, q)
 
     def test_unreleased_baseline_changed_executor_and_foreign_hold_refuse(self):
         with self.p.connect() as con: con.execute("UPDATE qualifications SET status='recorded'")
