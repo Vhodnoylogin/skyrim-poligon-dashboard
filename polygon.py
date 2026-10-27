@@ -169,6 +169,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         order_platform.init(self)
         import subject_companion_route
         subject_companion_route.init(self)
+        import held_semantic
+        held_semantic.init(self)
 
     @contextlib.contextmanager
     def connect(self):
@@ -743,6 +745,9 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                     request = json.loads(candidate["request"])
                     if request.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
                         continue  # Only reviewed atomic companion-execute can claim a file plan.
+                    import held_semantic
+                    if held_semantic.selected(self,request,con):
+                        continue  # Separate exact reviewed held-semantic-execute admission only.
                     if con.execute('SELECT id FROM operator_platform_bindings WHERE order_id=?',(candidate['id'],)).fetchone():
                         continue  # Only reviewed atomic execute-bound admits these orders.
                     if request.get("cycle") is not None or con.execute("SELECT id FROM released_orders WHERE id=?", (candidate["id"],)).fetchone():
@@ -883,7 +888,20 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         actual = result.get("checks") or []
         auxiliary = self.executor_auxiliary_checks(order, packet, result, actual, pinned_paths)
         companion_started = None
-        if order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
+        held_summary = None
+        import held_semantic
+        if held_semantic.selected(self,order):
+            auxiliary = [{**c,'provenance':c.get('provenance',{'component':'skyrim-autotest','stage':'preparation'})} for c in actual]
+            try:
+                from held_semantic_evidence import projection
+                held_summary=projection(self,order,packet)
+                actual,companion_started=held_summary['checks'],held_summary['subjectStarted']
+                if held_summary['uncertain'] or not held_summary['completed']:
+                    auxiliary.append({'name':'held-semantic-transport','result':'failed','provenance':{'component':'held-semantic'}})
+            except (OSError,ValueError,KeyError,TypeError):
+                actual,companion_started=[],False
+                auxiliary.append({'name':'held-semantic-evidence','result':'failed','provenance':{'component':'held-semantic'}})
+        elif order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
             # Keep core readiness in its own tooling projection; never rewrite raw checks.
             auxiliary = [{**c, 'provenance': c.get('provenance', {'component': 'skyrim-autotest', 'stage': 'preparation'})}
                          for c in actual]
@@ -956,7 +974,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             outcome = "tested_successfully"
         else:
             outcome = "incomplete"
-        return {"outcome": outcome, "testingStarted": started, "startContractAvailable": testing is not None,
+        projection = {"outcome": outcome, "testingStarted": started, "startContractAvailable": testing is not None,
                 "interruptionObserved": external or failed_tool, "subjectMismatchObserved": failed_subject,
                 "coverage": {"required": len(plan) if testing else None, "performed": sum(c["status"] in ("passed", "failed") for c in coverage),
                              **counts, "checks": coverage},
@@ -966,6 +984,10 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                                                   "provenance": c["provenance"]} for c in auxiliary]},
                 "requestedData": [{"name": name, "status": "unassessed"} for name in order["collect"]],
                 "execution": cause, "analysis": None}
+        if held_summary is not None:
+            from held_semantic_evidence import complete_projection
+            return complete_projection(projection,order,packet,held_summary)
+        return projection
 
     @staticmethod
     def verify_packet(row):
@@ -1139,6 +1161,9 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             existing = con.execute("SELECT id FROM platform_attempts WHERE id=?", (platform_key,)).fetchone()
         if existing:
             return self.verify_platform(order, attempt_id=attempt_id)
+        import held_semantic
+        if held_semantic.selected(self,order):
+            return held_semantic.freeze(self,order,attempt_id)
         if order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
             from subject_companion_route import freeze
             return freeze(self, order, attempt_id=attempt_id)
@@ -1236,6 +1261,9 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         return self.verify_platform(order, attempt_id=attempt_id)
 
     def verify_platform(self, order, require_file=True, attempt_id=None):
+        import held_semantic
+        if held_semantic.selected(self,order):
+            return held_semantic.verify(self,order,require_file,attempt_id)
         if order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
             from subject_companion_route import verify
             return verify(self, order, require_file, attempt_id=attempt_id)
@@ -1316,9 +1344,14 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             if result.get("restored") is not True or result.get("restoreErrors"):
                 findings.append({"component": "skyrim-autotest", "kind": "restoration_unverified", "details": result.get("restoreErrors"), "confirmed": True})
         order = json.loads(self.get(job)["request"])
-        if run and order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
+        import held_semantic
+        is_held = held_semantic.selected(self,order)
+        if run and (order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE or is_held):
             try:
-                from companion_evidence import collect
+                if is_held:
+                    from held_semantic_evidence import collect
+                else:
+                    from companion_evidence import collect
                 companion = collect(self, order, run)
                 if not companion['completed'] or companion['uncertain']:
                     raise ValueError('Companion completion is unavailable or a native outcome is uncertain')
@@ -1329,7 +1362,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                 self.verify_platform(order)
             except (OSError, ValueError) as error:
                 findings.append({"component": "platform", "kind": "changed_build", "details": str(error), "confirmed": True})
-        if order.get("cycle") or order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
+        if order.get("cycle") or order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE or is_held:
             try:
                 if not run:
                     raise ValueError("No run lifecycle evidence")
@@ -1431,9 +1464,14 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         if run:
             files.extend(raw_evidence_pins(run))
         companion_summary = None
-        if run and order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE:
+        import held_semantic
+        is_held=held_semantic.selected(self,order)
+        if run and (order.get('subjectPlan', {}).get('interface') == subject_contract.FILE_INTERFACE or is_held):
             try:
-                from companion_evidence import collect
+                if is_held:
+                    from held_semantic_evidence import collect
+                else:
+                    from companion_evidence import collect
                 companion_summary = collect(self, order, run)
                 for entry in companion_summary['pins']:
                     if entry not in files: files.append(entry)
@@ -1445,7 +1483,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                   "reason": note, "runDirectory": str(run) if run else None,
                   "restored": restored, "files": files, "requestedData": order["collect"],
                   "analysis": None, "finishedAt": time.time()}
-        if companion_summary is not None: packet['subjectCompanion'] = companion_summary
+        if companion_summary is not None: packet['heldSemantic' if is_held else 'subjectCompanion'] = companion_summary
         shared_path = folder / "shared-session.json"
         if shared_path.exists():
             packet["sharedSession"] = read(shared_path)
@@ -1562,7 +1600,13 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         for pin in read(self.evidence_dir(job) / "executor-pins.json"):
             if digest(pin["path"]) != pin["sha256"]:
                 raise ValueError("Executor changed after claim")
-        if order.get('schemaVersion') == 2 and plan.get('companionSelection'):
+        if order.get('schemaVersion') == 2 and plan.get('heldSemanticSelection'):
+            import held_semantic
+            import order_platform
+            if held_semantic.admission(self,order['id'])!=plan['heldSemanticAdmission']:
+                raise ValueError('Exact atomic held semantic admission required before native dispatch')
+            runner=order_platform.activate(plan['executor'])
+        elif order.get('schemaVersion') == 2 and plan.get('companionSelection'):
             import subject_companion_route
             import order_platform
             if subject_companion_route.admission(self, order['id']) != plan['companionAdmission']:
@@ -1578,6 +1622,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             from skyrim_autotest import runner
         from skyrim_autotest.config import load
         runner.configure(load(self.evidence_dir(job) / "config.json"))
+        if order.get('schemaVersion') == 2 and plan.get('heldSemanticSelection'):
+            return held_semantic.run(self,order,plan,runner)
         if order.get('schemaVersion') == 2 and plan.get('companionSelection'):
             return subject_companion_route.run(self, order, plan, runner)
         return runner.run(self.source_profile(order, runner), self.evidence_dir(job) / "scenario.json",
@@ -1961,6 +2007,8 @@ def main(argv=None):
         sub.add_parser(command).add_argument('request', type=Path)
     for command in ('companion-bind', 'companion-execute'):
         sub.add_parser(command).add_argument('request', type=Path)
+    for command in ('held-semantic-bind','held-semantic-execute'):
+        sub.add_parser(command).add_argument('request',type=Path)
     sub.add_parser('companion-pretest-admit', help='Reviewed zero-native continuation hold transfer; does not launch').add_argument('request', type=Path)
     sub.add_parser('companion-pretest-run', help='Run the exact admitted zero-native companion attempt once').add_argument('id')
     sub.add_parser('companion-poststart-admit', help='Reviewed prospective full-replay hold transfer; does not launch').add_argument('request', type=Path)
@@ -1986,6 +2034,9 @@ def main(argv=None):
         elif args.command == 'companion-pretest-admit':
             from companion_pretest_resume import admit
             result = admit(polygon, args.request)
+        elif args.command in ('held-semantic-bind','held-semantic-execute'):
+            import held_semantic
+            result=(held_semantic.register if args.command=='held-semantic-bind' else held_semantic.execute)(polygon,args.request)
         elif args.command in ('companion-bind', 'companion-execute'):
             import subject_companion_route
             result = (subject_companion_route.register if args.command == 'companion-bind' else subject_companion_route.execute)(polygon, args.request)

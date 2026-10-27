@@ -136,6 +136,9 @@ For a finite origin-authored machine-oracle plan over the unchanged owned SE
 interactive executor, see [ordinary subject companions](docs/subject-companion.md).
 This separate explicit route preserves core baseline evidence and keeps expanded
 subject capabilities under test; normal queue dispatch cannot launch these plans.
+An operator can also select [held semantic execution](docs/held-semantic-plans.md)
+for an unchanged ordinary schema2 semantic order. Its private transport boundary
+does not replace the origin's factual start checkpoint or testing roles.
 
 ## Retained schemaVersion1 orders
 
