@@ -1,6 +1,7 @@
 """Operator-only, single-start candidate qualification under the shared barrier."""
 from __future__ import annotations
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -201,7 +202,7 @@ class Qualifications:
                 if old['request'] != canonical:
                     raise ValueError('Qualification identity is immutable')
                 return {'id': request['id'], 'duplicate': True}
-            if (self.qualification_busy(con) or con.execute("SELECT id FROM qualifications WHERE status NOT IN ('recorded','released')").fetchone()
+            if (self.qualification_busy(con) or con.execute("SELECT id FROM qualifications WHERE status NOT IN ('recorded','released','abandoned')").fetchone()
                     or con.execute('SELECT id FROM jobs WHERE id=?', (order['id'],)).fetchone()):
                 raise ValueError('Recover existing owner or qualification first; do not reuse mod orders')
             con.execute("INSERT INTO qualifications VALUES(?,?,'prepared',NULL,NULL)", (request['id'], canonical))
@@ -209,6 +210,70 @@ class Qualifications:
                         ('qualification-' + request['id'], 'Exclusive qualification lease; retain after completion until owner-reviewed clearance'))
             self.event(con, request['id'], 'qualification_prepared')
         return {'id': request['id'], 'status': 'prepared', 'holdId': 'qualification-' + request['id']}
+
+    def qualification_abandon_prepared(self, identity, review_path):
+        """Retire an explicitly reviewed reservation which never reached dispatch.
+
+        Changed live input pins are why a fresh reservation may be needed; they
+        are never rewritten here. No result packet, attempt or launch is created.
+        """
+        m = api(); review_path = Path(review_path).resolve(); review = m.read(review_path)
+        review_hash = m.digest(review_path)
+        if (review.get('schemaVersion') != 1 or review.get('kind') != 'qualification-prepared-abandon-review' or
+                review.get('qualificationId') != identity or any(review.get(key) is not True for key in
+                ('noDispatchReviewed', 'zeroStartsReviewed', 'installationSettled'))):
+            raise ValueError('Explicit exact prepared-abandon review required')
+        for key in ('verifiedBy', 'reason'): m.required_string(review, key)
+        m.owner_evidence(review, review_path, require_deadline=False)
+        row = self.qualification_show(identity); plan = json.loads(row['request'])
+        if (review.get('preparedRequestSha256') != hashlib.sha256(row['request'].encode('utf-8')).hexdigest() or
+                inventory(plan['executor']) != plan['executorPins']):
+            raise ValueError('Original prepared request or pinned native observer changed')
+        from order_platform import activate
+        runner = activate(plan['executor'])
+        with runner.native.SessionMutex(), self.connect() as con:
+            con.execute('BEGIN IMMEDIATE')
+            current = con.execute('SELECT * FROM qualifications WHERE id=?', (identity,)).fetchone()
+            if (dict(current) != row or row['status'] != 'prepared' or row['expires'] is not None or
+                    row['packet'] is not None or self.qualification_busy(con) or
+                    con.execute('SELECT id FROM attempts WHERE id=?', ('qualification-' + identity,)).fetchone()):
+                raise ValueError('Only unchanged unstarted prepared reservation may be abandoned')
+            hold = con.execute('SELECT note FROM pipeline_holds WHERE id=?', ('qualification-' + identity,)).fetchone()
+            if not hold or hold['note'] != 'Exclusive qualification lease; retain after completion until owner-reviewed clearance':
+                raise ValueError('Exact routine reservation required; other holds remain unchanged')
+            if (con.execute("SELECT id FROM qualifications WHERE id != ? AND status IN ('prepared','running')", (identity,)).fetchone() or
+                    con.execute("SELECT j.id FROM jobs j JOIN released_orders r ON r.id=j.id WHERE j.status IN ('queued','running','waiting_player','session_waiting')").fetchone() or
+                    con.execute("SELECT id FROM jobs WHERE status IN ('queued','session_waiting') AND json_extract(request,'$.cycle') IS NOT NULL").fetchone() or
+                    con.execute("SELECT id FROM retry_attempts WHERE status='queued'").fetchone() or
+                    con.execute("SELECT id FROM game_sessions WHERE status='queued'").fetchone()):
+                raise ValueError('Other active or released work retains reservation')
+            folder = self.local / 'qualifications' / identity
+            runtime = Path(plan['configuration']['runtime'])
+            from qualification_pre_native import _absolute
+            _absolute(str(folder)); _absolute(str(runtime))
+            if (folder.exists() and (not folder.is_dir() or any(folder.iterdir())) or
+                    runtime.exists() and (not runtime.is_dir() or any(runtime.iterdir()))):
+                raise ValueError('Dispatch/native artifacts exist; no zero-start inference permitted')
+            if self.host().get('runnerConfig'):
+                for state in (Path(m.read(self.host()['runnerConfig'])['runtime']) / 'runs').glob('*/state.json'):
+                    if m.read(state).get('done') is not True: raise ValueError('Unfinished host session retains reservation')
+            processes = runner.native.processes()
+            if (not isinstance(processes, list) or not processes or
+                    any(not isinstance(p, dict) or not isinstance(p.get('name'), str) or not p['name'] or
+                        type(p.get('pid')) is not int or p['pid'] <= 0 for p in processes) or
+                    any(p['name'].lower() in runner.GAME_NAMES for p in processes)):
+                raise ValueError('Fresh complete native idle inventory required')
+            if inventory(plan['executor']) != plan['executorPins'] or m.digest(review_path) != review_hash:
+                raise ValueError('Observer or prepared-abandon review changed')
+            result = {'id': identity, 'status': 'abandoned', 'actualGameStarts': 0,
+                      'cumulativeActualGameStartsBefore': plan['cumulativeActualGameStartsBefore'],
+                      'cumulativeActualGameStartsAfter': plan['cumulativeActualGameStartsBefore'],
+                      'review': {'path': str(review_path), 'sha256': review_hash},
+                      'globalProviderQualified': False, 'launchAuthorityGranted': False}
+            con.execute("UPDATE qualifications SET status='abandoned' WHERE id=?", (identity,))
+            con.execute('DELETE FROM pipeline_holds WHERE id=?', ('qualification-' + identity,))
+            self.event(con, identity, 'qualification_prepared_abandoned', json.dumps(dict(result, reviewed=review), sort_keys=True))
+        return result
 
     def qualification_guard(self, con, identity):
         if self.qualification_busy(con):

@@ -219,3 +219,30 @@ For an ended, restored client that refused its HTTP connection before adopting
 run identity or sending any action, see [pre-client collection](qualification-preclient.md).
 That explicit diagnostic retains all not_run cases and the consumed start/hold;
 it never treats missing report fields as a successful qualification.
+
+## Abandon a reservation refused before dispatch
+
+`qualification-abandon-prepared ID REVIEW.json` retires only an unstarted
+`prepared` reservation with null expiry/packet, no attempt row, no native or
+qualification dispatch artifacts, and an empty candidate runtime. This covers
+an input-pin refusal before `qualification-run` changes the row to running,
+including MO2 normalizing profile files while it closes. An outer operator
+intent alone does not prove native dispatch. Its original files remain intact.
+
+The review is schemaVersion1, kind `qualification-prepared-abandon-review`,
+with exact qualificationId, verifiedBy, reason, actual ownerAuthorization and
+true noDispatchReviewed, zeroStartsReviewed and installationSettled. Bind
+preparedRequestSha256 to SHA256 of the unchanged stored request's UTF-8 bytes.
+The pinned executor must remain unchanged. Under its native mutex and a SQLite
+write transaction the command verifies a complete no-game inventory, no active
+owner or unfinished host session, and no previously released/eligible work that
+could become runnable. A child/attempt, run artifact, ambiguity or changed
+reservation refuses abandonment; use the ordinary recovery path instead.
+
+The terminal `abandoned` row preserves its original request and null packet.
+An event retains the review/hash and zero actual starts; the cumulative baseline
+is unchanged, including null. Only its own routine reservation is removed;
+other holds and queues remain untouched. No pass, qualification, retry, fresh
+allowance or new launch follows. Reusing that id cannot dispatch it again. Any
+future reservation needs a fresh id, current frozen inputs and its own ordinary
+reviewed authority.
