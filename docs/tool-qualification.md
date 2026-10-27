@@ -206,3 +206,8 @@ hold. `qualification-run` on the same id remains refused after completion/releas
 Artifacts: `local/skyrim-polygon/qualifications/<id>/`; plan is also immutable in
 the qualifications SQLite table. `qualification-show` and `pipeline-status` expose
 the admission/lease status. This protocol changes no global host configuration.
+
+For an ended, restored client that refused its HTTP connection before adopting
+run identity or sending any action, see [pre-client collection](qualification-preclient.md).
+That explicit diagnostic retains all not_run cases and the consumed start/hold;
+it never treats missing report fields as a successful qualification.
