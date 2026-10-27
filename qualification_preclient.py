@@ -124,7 +124,7 @@ def verify_prefix(plan, folder, state_path):
 
 
 def verify_startup_prefix(plan, folder, state_path):
-    """Guardian-ended startup before the source-defined client admission gate."""
+    """Ended native startup before the source-defined client admission gate."""
     m = api(); folder, state_path = Path(folder), Path(state_path)
     state, result = m.read(state_path), m.read(state_path.parent / 'result.json')
     expected = 'qualification-' + plan['id']; worker = _identity(m.read(folder / 'worker.json').get('identity'))
@@ -137,29 +137,77 @@ def verify_startup_prefix(plan, folder, state_path):
             result.get('id') == state['id'] and result.get('restored') is True and not result.get('restoreErrors') and
             result.get('result') == state.get('result') == 'failed', 'ended failed startup and completed restoration required')
     recovery = state.get('guardianRecovery', {})
-    require(isinstance(recovery.get('trigger'), str) and recovery['trigger'] and
-            recovery.get('prior', {}).get('phase') in {'wait-devbench', 'se-native-startup-events', 'wait-task-queue'} and
-            state.get('phase') == 'stop-and-restore', 'only the reviewed guardian-ended pre-world startup is supported')
     child = m.read(folder / 'child-exit.json')
-    require(set(child) == {'returncode'} and type(child['returncode']) is int and child['returncode'] == 125,
-            'exact native termination exit125 required')
+    require(set(child) == {'returncode'} and type(child['returncode']) is int and child['returncode'] in (1, 125),
+            'exact native termination exit125 or failed-before-client exit1 required')
+    native_failure = child['returncode'] == 1
+    allowed_phases = {'snapshot', 'start-mo2', 'start-skse', 'wait-devbench',
+                      'se-native-startup-events', 'wait-task-queue', 'stop-and-restore'}
+    if native_failure:
+        require(not recovery and state.get('phase') == 'stop-and-restore' and not state.get('fixtureAnchor') and
+                not state.get('ownedWorldGeneration') and not state.get('initialWorldTransition', {}).get('completed'),
+                'only failed native bootstrap before world completion/client admission is supported')
+        allowed_phases.update({'startup-crash-capture', 'gameplay-startup-screen', 'gameplay-new-game-menu', 'gameplay-new-game-load',
+                               'gameplay-new-game-initial-world', 'gameplay-world-ready'})
+        exits = [row for row in state.get('gameProcessObservations', []) if row.get('status') == 'exited']
+        require(exits and all(row.get('identityVerified') is True and row.get('identity') == game and
+                row.get('expectedIdentity') == game and row.get('exitCodeAvailable') is True and
+                type(row.get('exitCode')) is int and 0 < row['exitCode'] < 2**32 and
+                row.get('exitCodeHex') == f"0x{row['exitCode']:08X}" for row in exits) and
+                len({row['exitCode'] for row in exits}) == 1, 'exact observed nonzero owned game exit required')
+    else:
+        require(isinstance(recovery.get('trigger'), str) and recovery['trigger'] and
+                recovery.get('prior', {}).get('phase') in {'wait-devbench', 'se-native-startup-events', 'wait-task-queue'} and
+                state.get('phase') == 'stop-and-restore', 'only the reviewed guardian-ended pre-world startup is supported')
     require(not state.get('interactiveSession') and not state.get('gameplayBootstrap') and
             not state.get('interactiveArtifacts') and not state.get('interactiveActorFixtures'), 'interactive or world-ready ownership was reached')
     root = folder / 'subject-companion'; manifest = root / 'executor-manifest.json'
-    require(root.is_dir() and [x.name for x in root.iterdir()] == ['executor-manifest.json'] and
+    names_expected = {'executor-manifest.json', 'dispatch.json'} if native_failure else {'executor-manifest.json'}
+    require(root.is_dir() and {x.name for x in root.iterdir()} == names_expected and
             m.read(manifest) == {'schemaVersion': 1, 'files': plan['executorPins']},
             'client output or unexpected helper artifacts exist; never infer a missing client identity')
+    if native_failure:
+        require(m.read(root / 'dispatch.json') == {'schemaVersion': 1, 'orderId': expected,
+                'qualificationId': plan['id'], 'worker': worker},
+                'only the initial exact dispatcher prefix without client intent/identity is supported')
     steps = [json.loads(line) for line in (state_path.parent / 'steps.jsonl').read_text(encoding='utf-8').splitlines()]
     forbidden = {'interactive-ready', 'interactive-action-delivered', 'gameplay-ready', 'bootstrap-completed'}
-    require(not any(x.get('kind') in forbidden or x.get('commandId') for x in steps), 'subject/client action or readiness evidence exists')
+    require(not any(x.get('kind') in forbidden or x.get('commandId') or
+            (native_failure and str(x.get('kind', '')).startswith('interactive-')) for x in steps),
+            'subject/client action or readiness evidence exists')
     phases = [x.get('name') for x in steps if x.get('kind') == 'phase']
-    require(phases and phases[-1] == 'stop-and-restore' and all(x in {
-        'snapshot', 'start-mo2', 'start-skse', 'wait-devbench', 'se-native-startup-events', 'wait-task-queue', 'stop-and-restore'} for x in phases),
+    require(phases and phases[-1] == 'stop-and-restore' and all(x in allowed_phases for x in phases),
         'native progressed beyond the source-defined startup gate')
     names = [x['name'] for x in m.read(plan['companion']['plan']['path'])['checks']]
     for name in ('plan', 'sequencer', 'transport'): _pin(plan['companion'][name])
-    return {'report': None, 'reason': state.get('reason') or recovery['trigger'], 'state': state, 'client': None,
-            'names': names, 'finish': None}
+    return {'report': None, 'reason': state.get('reason') or recovery.get('trigger'), 'state': state, 'client': None,
+            'names': names, 'finish': None,
+            'failureMode': 'native-failed-before-client' if native_failure else 'guardian-ended-pre-world'}
+
+
+def verify_ended_technical_review(plan, folder, state_path, pin, checked):
+    """Pin the independent operator's raw inventory; it never replaces native proof."""
+    m = api(); path = _pin(pin); review = m.read(path)
+    require(review.get('schemaVersion') == 1 and review.get('qualificationId') == plan['id'] and
+            Path(review.get('nativeRun', '')).resolve() == Path(state_path).parent.resolve() and
+            review.get('nativeDoneRestoredCollected') is True and review.get('nativeResult') == 'failed' and
+            review.get('noClientReport') is True and review.get('componentActions') == 0 and
+            type(review.get('componentActions')) is int and type(review.get('componentChecksNotRun')) is int and
+            review['componentChecksNotRun'] == len(checked['names']) and
+            review.get('workerExit') == {'returncode': 1} and
+            type(review.get('gameExit')) is int and review['gameExit'] ==
+                next(row['exitCode'] for row in checked['state']['gameProcessObservations'] if row.get('status') == 'exited') and
+            review.get('dispatch') == m.read(Path(folder) / 'subject-companion/dispatch.json'),
+            'ended technical review attribution or no-client/no-action facts differ')
+    raw = review.get('rawPins')
+    require(isinstance(raw, list) and raw and len(raw) <= 100000, 'bounded reviewed raw inventory required')
+    paths = []
+    for item in raw: paths.append(str(_pin(item)))
+    critical = {str(Path(folder) / name) for name in ('plan.json', 'worker.json', 'child-exit.json',
+                'subject-companion/dispatch.json', 'subject-companion/executor-manifest.json')}
+    critical.update(str(Path(state_path).parent / name) for name in ('state.json', 'result.json', 'steps.jsonl'))
+    require(len(paths) == len(set(paths)) and critical <= set(paths), 'duplicate or incomplete reviewed raw inventory')
+    return {'path': str(path), 'sha256': m.digest(path)}
 
 
 def record(p, identity, review_path, *, startup=False):
@@ -186,10 +234,15 @@ def record(p, identity, review_path, *, startup=False):
         require(len(runs) == 1, 'one exact native run required')
         state_path = runs[0]
         checked = (verify_startup_prefix if startup else verify_prefix)(plan, folder, state_path); state = checked['state']
+        technical_review = None
+        if checked.get('failureMode') == 'native-failed-before-client':
+            technical_review = verify_ended_technical_review(plan, folder, state_path, review.get('endedTechnicalReview'), checked)
         exact_paths = {'plan': folder / 'plan.json', 'state': state_path, 'result': state_path.parent / 'result.json',
             'childExit': folder / 'child-exit.json', 'worker': folder / 'worker.json'}
         if not startup:
             exact_paths.update(report=folder / 'subject-companion/report.json', dispatch=folder / 'subject-companion/dispatch.json')
+        elif technical_review:
+            exact_paths['dispatch'] = folder / 'subject-companion/dispatch.json'
         for key, path in exact_paths.items(): _pin(review[key], path)
         require(p.native_game_starts(state) == 1, 'exactly one consumed physical start required')
         archive = state_path.parent / 'test-profile'; archived, directories = archive_inventory(archive)
@@ -230,6 +283,7 @@ def record(p, identity, review_path, *, startup=False):
             retained_originals.append({'originalPath': str(source), 'retainedPath': str(destination), 'sha256': original['sha256']})
         files.extend(plan['executorPins']); files.extend(review['implementationPins'])
         files.append({'path': str(review_path), 'sha256': m.digest(review_path)})
+        if technical_review: files.append(technical_review)
         files = sorted({x['path']: x for x in files}.values(), key=lambda x: x['path'])
         packet = {'schemaVersion': 1, 'kind': STARTUP_KIND if startup else KIND, 'id': identity, 'orderId': plan['orderData']['id'],
             'sourceThreadId': plan['orderData']['sourceThreadId'], 'runDirectory': str(state_path.parent),
@@ -245,6 +299,9 @@ def record(p, identity, review_path, *, startup=False):
             'ownerFinishCommandId': checked['finish'], 'recordedRestoration': restoration,
             'retainedOriginalPins': retained_originals,
             'profileArchivePins': archived, 'profileArchiveDirectories': directories, 'files': files}
+        if startup:
+            packet['startupFailureMode'] = checked['failureMode']
+            if technical_review: packet['endedTechnicalReview'] = technical_review
         m.write(output / 'packet.json', packet)
         con.execute("UPDATE qualifications SET status='recorded',packet=? WHERE id=?", (json.dumps({'path': str(output / 'packet.json'), 'sha256': m.digest(output / 'packet.json')}), identity))
         p.event(con, identity, 'startup_diagnostic_recorded' if startup else 'preclient_diagnostic_recorded',
@@ -259,6 +316,9 @@ def verify_packet(p, plan, packet):
     folder = p.local / 'qualifications' / plan['id']; run = Path(packet['runDirectory'])
     startup = packet['kind'] == STARTUP_KIND
     checked = (verify_startup_prefix if startup else verify_prefix)(plan, folder, run / 'state.json')
+    if checked.get('failureMode') == 'native-failed-before-client':
+        require(packet.get('startupFailureMode') == checked['failureMode'], 'startup failure mode changed')
+        verify_ended_technical_review(plan, folder, run / 'state.json', packet.get('endedTechnicalReview'), checked)
     require(packet.get('componentCoverage') == [{'name': n, 'result': 'not_run'} for n in checked['names']] and
             packet.get('ownerFinishCommandId') == checked['finish'], 'diagnostic coverage changed')
     originals = packet.get('retainedOriginalPins', [])
