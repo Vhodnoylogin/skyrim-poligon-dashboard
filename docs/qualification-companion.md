@@ -27,7 +27,7 @@ The ordinary generic qualification scenario retains at least one real core
 check and declares the same cell with `startMode:"new-game"`.
 
 Use an explicitly configured cold-owned SE native startup. The frozen
-`interactive_session` must have the same window in1..600seconds,
+`interactive_session` must have the same window in1..(maximumWallSeconds-300)seconds,
 `sourceId:"operator.actions"`, an absolute channel path, the `inspect`, `papyrus`
 and `platform` allowlist, and the reviewed typed `nativeBindings`. Additional
 candidate opt-ins such as `npcPersistence`, `morphSession` and
@@ -46,8 +46,13 @@ data client with `--order-id` and `--attempt-id` equal to
 `qualification-QUALIFICATION_ID`. The client verifies its exact manifest, fresh
 empty channel and exclusive per-run claim before any action.
 
-The outer qualification wall remains900seconds. The companion is limited to
-600seconds and60seconds of the original outer window are reserved for native
+The outer qualification wall is explicitly frozen in900..14400seconds. Historical
+900second requests still admit at most600companion seconds. A longer manual
+inspection can declare7200outer/6900companion seconds, for example; the pinned
+plan, native interactive configuration and client all retain exactly the same
+6900second window. The companion maximum is the declared wall minus300seconds,
+with an absolute14100second ceiling. There are no implicit renewals.
+60seconds of the original outer window are reserved for native
 restoration. Before the native start and again at client admission, the full
 declared companion window plus that reserve must still fit. Startup admission
 is bounded by240seconds and the earlier original deadline. The native executor's

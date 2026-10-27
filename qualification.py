@@ -76,8 +76,9 @@ class Qualifications:
                 or not m.SAFE_ID.fullmatch(request.get('id', ''))
                 or request.get('maximumActualGameStarts') != 1
                 or type(request.get('maximumActualGameStarts')) is not int
-                or request.get('maximumWallSeconds') != 900):
-            raise ValueError('Operator tool qualification requires one start and 900 seconds')
+                or type(request.get('maximumWallSeconds')) is not int
+                or not 900 <= request['maximumWallSeconds'] <= 14400):
+            raise ValueError('Operator tool qualification requires one start and an explicit900..14400second wall')
         m.owner_evidence(request, path)
         baseline = request.get('cumulativeActualGameStartsBefore')
         if ('cumulativeActualGameStartsBefore' not in request or
@@ -225,7 +226,7 @@ class Qualifications:
             if con.execute('SELECT status FROM qualifications WHERE id=?', (identity,)).fetchone()[0] != 'prepared':
                 raise ValueError('Qualification may be dispatched only once')
             self.qualification_guard(con, identity)
-            expires = min(time.time() + 900, plan['deadlineUtc'])
+            expires = min(time.time() + plan['maximumWallSeconds'], plan['deadlineUtc'])
             con.execute("UPDATE qualifications SET status='running',expires=? WHERE id=?", (expires, identity))
         folder = self.local / 'qualifications' / identity
         m.write(folder / 'plan.json', plan)
@@ -242,7 +243,7 @@ class Qualifications:
                 result = {'returncode': child.returncode}
             except subprocess.TimeoutExpired:
                 # subprocess.run kills/waits only for this exact child. Native guardian restores.
-                result = {'timeout': True, 'reason': '900-second authority exhausted; guardian/native recovery required'}
+                result = {'timeout': True, 'reason': f"{plan['maximumWallSeconds']}-second authority exhausted; guardian/native recovery required"}
         m.write(folder / 'child-exit.json', result)
         return self.qualification_collect(identity)
 

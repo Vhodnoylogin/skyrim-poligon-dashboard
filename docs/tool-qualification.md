@@ -2,8 +2,8 @@
 
 For new component checks that require the existing held interactive owner, an
 explicit optional [qualification companion](qualification-companion.md) can be
-pinned and supervised inside this same one-start route. It retains the existing
-900second wall, adds independently verified component evidence and release
+pinned and supervised inside this same one-start route. It retains an explicit
+finite wall, adds independently verified component evidence and release
 gates, and leaves ordinary baseline admission and historical qualifications
 unchanged.
 
@@ -110,7 +110,15 @@ touch them. A bridge launch wrapper permits one launch request and rejects a
 second or expired request; scenario restart slots must be zero. Counting still
 uses distinct owned native game identities, never launcher PID/request counts.
 
-The parent waits at most 900 seconds (or the earlier authority deadline), kills
+`maximumWallSeconds` is an explicit integer900..14400. Existing900second requests
+retain precisely that bound. A longer owner-controlled inspection must declare
+its longer wall before registration; it never renews an admitted session. The
+parent freezes expiry at the earlier of dispatch time plus that declared wall
+and the original owner deadline. For example7200outer/6900interactive seconds
+reserves240seconds for startup and60seconds for restoration. The operator must
+tell the owner the actual remaining inspection window and its expiry.
+
+The parent waits at most the frozen declared wall (or earlier authority deadline), kills
 and waits only for its exact child on timeout, and retains the shared hold while
 the independent native guardian restores. Safe restoration may finish after the
 test authority expires. Timeout never admits another attempt or clears ownership.

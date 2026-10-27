@@ -18,7 +18,8 @@ import traceback
 import companion_evidence
 from subject_companion_route import _PollingStopped, _matching_live_runs, _retain_client
 
-MAXIMUM_SECONDS = 600
+MAXIMUM_SECONDS = 14100
+STARTUP_RESERVE_SECONDS = 240
 RESTORATION_RESERVE_SECONDS = 60
 
 
@@ -49,7 +50,10 @@ def validate(request, config, scenario, base):
     _require(type(spec) is dict and set(spec) == {'transport', 'plan', 'sequencer', 'maximumSeconds'},
              'transport, plan, sequencer and maximumSeconds are required')
     maximum = spec['maximumSeconds']
-    _require(type(maximum) is int and 1 <= maximum <= MAXIMUM_SECONDS, 'window must be1..600seconds inside the unchanged900second qualification')
+    wall = request.get('maximumWallSeconds')
+    _require(type(wall) is int and 900 <= wall <= 14400 and type(maximum) is int and
+             1 <= maximum <= min(MAXIMUM_SECONDS, wall - STARTUP_RESERVE_SECONDS - RESTORATION_RESERVE_SECONDS),
+             'window must fit the explicit outer wall minus240second startup and60second restoration reserves')
     selected = {name: _checked_pin(spec[name], Path(base)) for name in ('transport', 'plan', 'sequencer')}
     selected['maximumSeconds'] = maximum
     plan = companion_evidence._json(Path(selected['plan']['path']).read_bytes())
@@ -134,7 +138,7 @@ def run(p, plan, row, folder, runner, run_native):
     def companion():
         child = tracker = None
         try:
-            start_end = min(time.monotonic() + 240,
+            start_end = min(time.monotonic() + STARTUP_RESERVE_SECONDS,
                 time.monotonic() + expires - time.time() - maximum - RESTORATION_RESERVE_SECONDS)
             _require(start_end > time.monotonic(), 'insufficient original outer window for declared companion and restoration')
             while not stop.is_set() and time.monotonic() < start_end:
@@ -170,7 +174,7 @@ def run(p, plan, row, folder, runner, run_native):
                         client_box['child'] = child
                     record['identity'], tracker = _retain_client(child); save()
                     # The client also clamps itself to the original native window.
-                    # Parent supervision never extends the original900second limit.
+                    # Parent supervision never extends the original frozen outer limit.
                     end = min(expires - RESTORATION_RESERVE_SECONDS, state['deadline'] + 5)
                     while child.poll() is None:
                         if stop.is_set() or time.time() >= end:
