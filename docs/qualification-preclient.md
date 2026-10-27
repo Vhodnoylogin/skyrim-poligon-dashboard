@@ -75,17 +75,21 @@ no completed bootstrap, anchor attempt, interactive owner, delivered command or
 interactive readiness is accepted.
 
 For this prefix the helper directory must contain exactly executor-manifest.json
-and dispatch.json. Dispatch must contain only schemaVersion, exact orderId,
-qualificationId and worker. Any client intent, identity/PID, nativeRun admission,
-returncode/error, report, client log, inner identity or events refuses this path.
+and dispatch.json. Dispatch contains schemaVersion, exact orderId,
+qualificationId and worker. It may additionally retain the existing watcher's
+paired error/errorDetails diagnostic when the matching native run ends before
+client admission. Diagnostics require the bounded original traceback/operation/
+path/errno/winerror shape; they cannot include client fields. Any client intent,
+identity/PID, nativeRun admission, returncode, report, client log, inner identity
+or events refuses this path.
 A missing report after possible client admission is never evidence of not_run.
 
 The startup operator review additionally pins dispatch and endedTechnicalReview.
 That independent ended review binds the qualification/run, worker exit1, observed
 game exit, zero component actions, all original cases not_run and the exact initial
 dispatch. Its rawPins inventory must include plan/worker/child exit, manifest,
-dispatch, native state/result/steps; every listed hash is checked at recording and
-cached collection. Current implementation pins, original source/input pins,
+dispatch, native state/result/steps; every listed hash and optional exact byte
+count is checked at recording and cached collection. Current implementation pins, original source/input pins,
 restoration/backups, archive/removal and fresh process-death checks still apply.
 
 The existing startup diagnostic records startupFailureMode:native-failed-before-client.

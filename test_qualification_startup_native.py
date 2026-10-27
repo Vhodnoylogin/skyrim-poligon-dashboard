@@ -1,6 +1,7 @@
 """Ended native bootstrap failure is distinct from any admitted/missing client."""
 import copy
 import json
+from pathlib import Path
 import unittest
 
 import polygon as m
@@ -82,6 +83,38 @@ class NativeStartupTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'dispatcher prefix'): self.record()
         self.assertEqual(f.p.qualification_show('q-one')['status'], 'running')
 
+    def test_watcher_error_before_admission_is_retained_without_fabricating_client(self):
+        error = 'ValueError: Qualification companion: matching native qualification ended/changed before client admission'
+        diagnostic = {'error': error, 'errorDetails': {'traceback': 'Traceback (most recent call last):\n' + error + '\n',
+            'operation': 'qualification-companion', 'path': None, 'errno': None, 'winerror': None}}
+        self.dispatch.update(diagnostic)
+        self.f.write(self.f.comp / 'dispatch.json', self.dispatch)
+        packet = self.record()
+        self.assertEqual(packet['startupFailureMode'], 'native-failed-before-client')
+        self.assertFalse(packet['clientRunIdentityAvailable'])
+        self.assertTrue(packet['retainHold'])
+        self.assertTrue(all(row['result'] == 'not_run' for row in packet['componentCoverage']))
+        self.assertEqual(m.read(self.f.comp / 'dispatch.json'), self.dispatch)
+        self.assertFalse((self.f.comp / 'report.json').exists())
+
+    def test_watcher_diagnostic_never_allows_client_fields_or_malformed_details(self):
+        error = 'ValueError: ended before client admission'
+        diagnostic = {'error': error, 'errorDetails': {'traceback': error + '\n',
+            'operation': 'qualification-companion', 'path': None, 'errno': None, 'winerror': None}}
+        changes = ({'client': {}}, {'nativeRun': {}}, {'returncode': 1}, {'pid': 12},
+            {'errorDetails': dict(diagnostic['errorDetails'], client={})},
+            {'errorDetails': dict(diagnostic['errorDetails'], errno=True)},
+            {'errorDetails': dict(diagnostic['errorDetails'], traceback='a different error')},
+            {'errorDetails': {}}, {'error': ''})
+        for change in changes:
+            with self.subTest(change=change):
+                self.f.write(self.f.comp / 'dispatch.json', {**self.dispatch, **diagnostic, **change})
+                with self.assertRaises(ValueError): self.record()
+        for lone in ({'error': error}, {'errorDetails': diagnostic['errorDetails']}):
+            with self.subTest(lone=lone):
+                self.f.write(self.f.comp / 'dispatch.json', dict(self.dispatch, **lone))
+                with self.assertRaisesRegex(ValueError, 'dispatcher prefix'): self.record()
+
     def test_missing_client_report_after_possible_start_is_never_inferred_not_run(self):
         f = self.f
         for name in ('report.json', 'events.jsonl', 'client.log', 'inner-identity.json'):
@@ -96,6 +129,16 @@ class NativeStartupTests(unittest.TestCase):
                 (f.run / 'steps.jsonl').write_text(original+json.dumps(event)+'\n')
                 with self.assertRaisesRegex(ValueError, 'action or readiness'): self.record()
                 (f.run / 'steps.jsonl').write_text(original)
+
+    def test_native_review_accepts_only_exact_verified_optional_raw_byte_counts(self):
+        f = self.f; path = self.technical_review(); value = m.read(path)
+        for item in value['rawPins']: item['bytes'] = Path(item['path']).stat().st_size
+        f.write(path, value)
+        checked = d.verify_startup_prefix(f.plan, f.folder, f.run / 'state.json')
+        d.verify_ended_technical_review(f.plan, f.folder, f.run / 'state.json', f.pin(path), checked)
+        value['rawPins'][0]['bytes'] += 1; f.write(path, value)
+        with self.assertRaisesRegex(ValueError, 'byte count'):
+            d.verify_ended_technical_review(f.plan, f.folder, f.run / 'state.json', f.pin(path), checked)
 
     def test_completed_world_or_interactive_state_and_wrong_owned_exit_refuse(self):
         f = self.f; original = copy.deepcopy(f.state)

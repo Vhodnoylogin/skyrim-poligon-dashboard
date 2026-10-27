@@ -243,9 +243,23 @@ def verify_startup_prefix(plan, folder, state_path):
             m.read(manifest) == {'schemaVersion': 1, 'files': plan['executorPins']},
             'client output or unexpected helper artifacts exist; never infer a missing client identity')
     if native_failure:
-        require(m.read(root / 'dispatch.json') == {'schemaVersion': 1, 'orderId': expected,
-                'qualificationId': plan['id'], 'worker': worker},
+        dispatch = m.read(root / 'dispatch.json')
+        initial = {'schemaVersion': 1, 'orderId': expected, 'qualificationId': plan['id'], 'worker': worker}
+        require(type(dispatch) is dict and set(dispatch) in (set(initial), set(initial) | {'error', 'errorDetails'}) and
+                all(dispatch.get(key) == value for key, value in initial.items()),
                 'only the initial exact dispatcher prefix without client intent/identity is supported')
+        if 'error' in dispatch:
+            # The existing watcher retains a diagnostic if its matching native run
+            # ends before admission. It is not a client intent or client evidence.
+            detail = dispatch['errorDetails']
+            require(isinstance(dispatch['error'], str) and 0 < len(dispatch['error']) <= 4096 and
+                    type(detail) is dict and set(detail) == {'traceback', 'operation', 'path', 'errno', 'winerror'} and
+                    isinstance(detail['traceback'], str) and 0 < len(detail['traceback']) <= 262144 and
+                    detail['traceback'].rstrip().endswith(dispatch['error'].rstrip()) and
+                    isinstance(detail['operation'], str) and 0 < len(detail['operation']) <= 128 and
+                    (detail['path'] is None or isinstance(detail['path'], str) and 0 < len(detail['path']) <= 32768) and
+                    all(detail[key] is None or type(detail[key]) is int for key in ('errno', 'winerror')),
+                    'dispatcher error diagnostics must match the existing watcher shape without client evidence')
     steps = [json.loads(line) for line in (state_path.parent / 'steps.jsonl').read_text(encoding='utf-8').splitlines()]
     forbidden = {'interactive-ready', 'interactive-action-delivered', 'gameplay-ready', 'bootstrap-completed'}
     require(not any(x.get('kind') in forbidden or x.get('commandId') or
@@ -298,7 +312,7 @@ def verify_ended_technical_review(plan, folder, state_path, pin, checked, *, pre
     require(isinstance(raw, list) and raw and len(raw) <= 100000, 'bounded reviewed raw inventory required')
     paths = []
     for item in raw:
-        if (prebinding or recovered) and isinstance(item, dict) and set(item) == {'path', 'sha256', 'bytes'}:
+        if isinstance(item, dict) and set(item) == {'path', 'sha256', 'bytes'}:
             raw_path = _pin({key: item[key] for key in ('path', 'sha256')})
             require(type(item['bytes']) is int and item['bytes'] >= 0 and raw_path.stat().st_size == item['bytes'],
                     'reviewed raw byte count differs')
