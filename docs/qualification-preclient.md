@@ -92,3 +92,22 @@ The existing startup diagnostic records startupFailureMode:native-failed-before-
 It creates no client report, identity or action and grants no launch authority.
 Release remains refused; the original hold, consumed start and unknown cumulative
 baseline remain intact. Guardian exit125 retains its original narrower checks.
+
+## Recovered native cleanup with an unavailable game exit
+
+The same startup command accepts `native-recovered-before-client` when the native
+worker failed with exit1 before the unchanged client admission gate and an exact
+guardian decision subsequently recovered its abandoned cleanup. Native completion,
+restoration, collection, archived-profile removal and fresh exact process-death
+checks remain mandatory. The initial dispatch must still contain no client intent,
+identity, return or report; completed world/interactive ownership is refused.
+
+This case retains unavailable game-exit observations. It never infers normal exit
+or crash from later process absence. The independent endedTechnicalReview must pin
+the actual observations and guardian decision, affirm completed supported recovery
+after game/debugger death, and include the complete critical raw inventory. Its
+raw pins may include verified byte counts. The packet explicitly records
+gameExitCodeAvailable:false and gameExitCode:null. Every component remains not_run,
+qualificationOutcome remains not_conducted, and the original hold remains until a
+separate supported owner-reviewed clearance. No report, client identity, success,
+launch authority or cumulative count is fabricated.

@@ -200,20 +200,37 @@ def verify_startup_prefix(plan, folder, state_path):
     require(set(child) == {'returncode'} and type(child['returncode']) is int and child['returncode'] in (1, 125),
             'exact native termination exit125 or failed-before-client exit1 required')
     native_failure = child['returncode'] == 1
+    recovered_before_client = native_failure and bool(recovery)
     allowed_phases = {'snapshot', 'start-mo2', 'start-skse', 'wait-devbench',
                       'se-native-startup-events', 'wait-task-queue', 'stop-and-restore'}
     if native_failure:
-        require(not recovery and state.get('phase') == 'stop-and-restore' and not state.get('fixtureAnchor') and
+        require(state.get('phase') == 'stop-and-restore' and not state.get('fixtureAnchor') and
                 not state.get('ownedWorldGeneration') and not state.get('initialWorldTransition', {}).get('completed'),
                 'only failed native bootstrap before world completion/client admission is supported')
         allowed_phases.update({'startup-crash-capture', 'gameplay-startup-screen', 'gameplay-new-game-menu', 'gameplay-new-game-load',
                                'gameplay-new-game-initial-world', 'gameplay-world-ready'})
-        exits = [row for row in state.get('gameProcessObservations', []) if row.get('status') == 'exited']
-        require(exits and all(row.get('identityVerified') is True and row.get('identity') == game and
-                row.get('expectedIdentity') == game and row.get('exitCodeAvailable') is True and
-                type(row.get('exitCode')) is int and 0 < row['exitCode'] < 2**32 and
-                row.get('exitCodeHex') == f"0x{row['exitCode']:08X}" for row in exits) and
-                len({row['exitCode'] for row in exits}) == 1, 'exact observed nonzero owned game exit required')
+        if recovered_before_client:
+            decision = recovery.get('decision', {})
+            require(isinstance(recovery.get('trigger'), str) and recovery['trigger'] and
+                    recovery.get('prior', {}).get('phase') == 'stop-and-restore' and
+                    recovery.get('prior', {}).get('result') == 'failed' and
+                    decision.get('id') == state['id'] and decision.get('runner') == worker and
+                    decision.get('game') == game and decision.get('done') is False and
+                    decision.get('ownerAlive') is False and decision.get('action') == 'claim-recovery-mutex',
+                    'exact abandoned native cleanup recovery required')
+            observations = state.get('gameProcessObservations', [])
+            require(observations and all(row.get('expectedIdentity') == game for row in observations) and
+                    observations[-1].get('status') == 'unavailable' and
+                    all(row.get('exitCodeAvailable') is False and row.get('exitCode') is None and
+                        row.get('exitCodeHex') is None for row in observations),
+                    'retained unavailable game exit required; never manufacture an exit code')
+        else:
+            exits = [row for row in state.get('gameProcessObservations', []) if row.get('status') == 'exited']
+            require(exits and all(row.get('identityVerified') is True and row.get('identity') == game and
+                    row.get('expectedIdentity') == game and row.get('exitCodeAvailable') is True and
+                    type(row.get('exitCode')) is int and 0 < row['exitCode'] < 2**32 and
+                    row.get('exitCodeHex') == f"0x{row['exitCode']:08X}" for row in exits) and
+                    len({row['exitCode'] for row in exits}) == 1, 'exact observed nonzero owned game exit required')
     else:
         require(isinstance(recovery.get('trigger'), str) and recovery['trigger'] and
                 recovery.get('prior', {}).get('phase') in {'wait-devbench', 'se-native-startup-events', 'wait-task-queue'} and
@@ -241,12 +258,14 @@ def verify_startup_prefix(plan, folder, state_path):
     for name in ('plan', 'sequencer', 'transport'): _pin(plan['companion'][name])
     return {'report': None, 'reason': state.get('reason') or recovery.get('trigger'), 'state': state, 'client': None,
             'names': names, 'finish': None,
-            'failureMode': 'native-failed-before-client' if native_failure else 'guardian-ended-pre-world'}
+            'failureMode': 'native-recovered-before-client' if recovered_before_client else
+                'native-failed-before-client' if native_failure else 'guardian-ended-pre-world'}
 
 
 def verify_ended_technical_review(plan, folder, state_path, pin, checked, *, prebinding=False):
     """Pin the independent operator's raw inventory; it never replaces native proof."""
     m = api(); path = _pin(pin); review = m.read(path)
+    recovered = checked.get('failureMode') == 'native-recovered-before-client'
     require(review.get('schemaVersion') == 1 and review.get('qualificationId') == plan['id'] and
             Path(review.get('nativeRun', '')).resolve() == Path(state_path).parent.resolve() and
             review.get('nativeDoneRestoredCollected') is True and review.get('nativeResult') == 'failed' and
@@ -254,10 +273,19 @@ def verify_ended_technical_review(plan, folder, state_path, pin, checked, *, pre
             type(review.get('componentActions')) is int and type(review.get('componentChecksNotRun')) is int and
             review['componentChecksNotRun'] == len(checked['names']) and
             review.get('workerExit') == {'returncode': 125 if prebinding else 1} and
-            type(review.get('gameExit')) is int and review['gameExit'] ==
-                next(row['exitCode'] for row in checked['state']['gameProcessObservations'] if row.get('status') == 'exited') and
             review.get('dispatch') == m.read(Path(folder) / 'subject-companion/dispatch.json'),
             'ended technical review attribution or no-client/no-action facts differ')
+    if recovered:
+        require('gameExit' not in review and review.get('gameProcessObservations') == checked['state']['gameProcessObservations'] and
+                review.get('guardianRecovery') == checked['state']['guardianRecovery'] and
+                review.get('allExactOwnedProcessesDeadIncludingDebugger') is True and
+                review.get('freshNoGameCDBWerFault') is True and
+                review.get('supportedRecoveryAfterActualGameAndCDBEnded') is True,
+                'reviewed native recovery/death or unavailable exit facts differ')
+    else:
+        require(type(review.get('gameExit')) is int and review['gameExit'] ==
+                next(row['exitCode'] for row in checked['state']['gameProcessObservations'] if row.get('status') == 'exited'),
+                'ended technical review game exit differs')
     if prebinding:
         report = checked['report']
         expected = {key: report.get(key) for key in ('done', 'completed', 'status', 'reason', 'uncertain',
@@ -270,7 +298,7 @@ def verify_ended_technical_review(plan, folder, state_path, pin, checked, *, pre
     require(isinstance(raw, list) and raw and len(raw) <= 100000, 'bounded reviewed raw inventory required')
     paths = []
     for item in raw:
-        if prebinding and isinstance(item, dict) and set(item) == {'path', 'sha256', 'bytes'}:
+        if (prebinding or recovered) and isinstance(item, dict) and set(item) == {'path', 'sha256', 'bytes'}:
             raw_path = _pin({key: item[key] for key in ('path', 'sha256')})
             require(type(item['bytes']) is int and item['bytes'] >= 0 and raw_path.stat().st_size == item['bytes'],
                     'reviewed raw byte count differs')
@@ -314,7 +342,7 @@ def record(p, identity, review_path, *, startup=False, prebinding=False):
         checked = (verify_startup_prefix(plan, folder, state_path) if startup else
                    verify_prefix(plan, folder, state_path, prebinding=prebinding)); state = checked['state']
         technical_review = None
-        if prebinding or checked.get('failureMode') == 'native-failed-before-client':
+        if prebinding or checked.get('failureMode') in ('native-failed-before-client', 'native-recovered-before-client'):
             technical_review = verify_ended_technical_review(plan, folder, state_path, review.get('endedTechnicalReview'), checked, prebinding=prebinding)
         exact_paths = {'plan': folder / 'plan.json', 'state': state_path, 'result': state_path.parent / 'result.json',
             'childExit': folder / 'child-exit.json', 'worker': folder / 'worker.json'}
@@ -381,6 +409,9 @@ def record(p, identity, review_path, *, startup=False, prebinding=False):
             'profileArchivePins': archived, 'profileArchiveDirectories': directories, 'files': files}
         if startup:
             packet['startupFailureMode'] = checked['failureMode']
+            if checked['failureMode'] == 'native-recovered-before-client':
+                packet['gameExitCodeAvailable'] = False
+                packet['gameExitCode'] = None
             if technical_review: packet['endedTechnicalReview'] = technical_review
         if prebinding:
             packet['prebindingFailureMode'] = checked['failureMode']
@@ -401,9 +432,12 @@ def verify_packet(p, plan, packet):
     prebinding = packet['kind'] == PREBINDING_KIND
     checked = (verify_startup_prefix(plan, folder, run / 'state.json') if startup else
                verify_prefix(plan, folder, run / 'state.json', prebinding=prebinding))
-    if checked.get('failureMode') == 'native-failed-before-client':
+    if checked.get('failureMode') in ('native-failed-before-client', 'native-recovered-before-client'):
         require(packet.get('startupFailureMode') == checked['failureMode'], 'startup failure mode changed')
         verify_ended_technical_review(plan, folder, run / 'state.json', packet.get('endedTechnicalReview'), checked)
+        if checked['failureMode'] == 'native-recovered-before-client':
+            require(packet.get('gameExitCodeAvailable') is False and packet.get('gameExitCode') is None,
+                    'unavailable game exit cannot become a normal exit or crash verdict')
     if prebinding:
         require(packet.get('prebindingFailureMode') == checked['failureMode'], 'prebinding failure mode changed')
         require(packet.get('executionOutcome') == 'failed' and packet.get('subjectModAccepted') is False and
