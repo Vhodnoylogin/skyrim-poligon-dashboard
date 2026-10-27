@@ -1,5 +1,12 @@
 # One operator-owned candidate qualification
 
+For new component checks that require the existing held interactive owner, an
+explicit optional [qualification companion](qualification-companion.md) can be
+pinned and supervised inside this same one-start route. It retains the existing
+900second wall, adds independently verified component evidence and release
+gates, and leaves ordinary baseline admission and historical qualifications
+unchanged.
+
 This is a separate tool-only admission path, not a subject/mod workflow. Ordinary
 orders never select executable code. The operator independently verifies a direct
 human instruction and exact tool scope before using this path. No command here

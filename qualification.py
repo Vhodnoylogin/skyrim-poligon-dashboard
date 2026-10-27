@@ -107,6 +107,9 @@ class Qualifications:
             if (step.get('tool') in ('console', 'game') or
                     'restart' in json.dumps(args).lower()):
                 raise ValueError('Qualification forbids restarts and arbitrary game/console commands')
+        if 'companion' in request:
+            from qualification_companion import validate as validate_companion
+            request['companion'] = validate_companion(request, config, scenario, path.parent)
         pins = []
         def pin(file):
             file = Path(file).resolve()
@@ -114,6 +117,9 @@ class Qualifications:
         for file in (path, request['order'], config_path, scenario_path,
                      self.local / 'config.json', request['ownerAuthorization']['path']):
             pin(file)
+        if 'companion' in request:
+            for name in ('transport', 'plan', 'sequencer'):
+                pin(request['companion'][name]['path'])
         accounting = request.get('launchAccounting')
         if not isinstance(accounting, dict):
             raise ValueError('Pinned independently reviewed launch accounting required')
@@ -256,8 +262,12 @@ class Qualifications:
         from skyrim_autotest.config import load
         from skyrim_autotest.scenarios import validate
         from skyrim_autotest.restart_budget import plan as restart_plan
-        load(plan['configPath'])
+        configuration = load(plan['configPath'])
         validate(plan['scenario'])
+        if 'companion' in plan:
+            from qualification_companion import validate as validate_companion
+            if validate_companion(plan, configuration, plan['scenario'], Path(plan['requestPath']).parent) != plan['companion']:
+                raise ValueError('Normalized qualification companion recipe differs')
         if restart_plan(plan['scenario'])['maximum'] != 0:
             raise ValueError('Qualification cannot reserve a restart')
         return 0
@@ -303,8 +313,13 @@ class Qualifications:
             if con.execute('SELECT status FROM qualifications WHERE id=?', (identity,)).fetchone()[0] != 'running':
                 raise ValueError('Qualification claim changed')
             con.execute('INSERT INTO attempts VALUES(?,?)', ('qualification-' + identity, time.time()))
-        return runner.run(profile, folder / 'scenario.json', restart_idle_mo2=True,
-                          order={'id': 'qualification-' + identity, 'owner': plan['orderData']['sourceChat']})
+        def run_native():
+            return runner.run(profile, folder / 'scenario.json', restart_idle_mo2=True,
+                              order={'id': 'qualification-' + identity, 'owner': plan['orderData']['sourceChat']})
+        if 'companion' in plan:
+            from qualification_companion import run as run_companion
+            return run_companion(self, plan, row, folder, runner, run_native)
+        return run_native()
 
     def qualification_recover(self, identity):
         """Restore only this candidate runtime; never launch or refresh its allowance."""
@@ -364,6 +379,9 @@ class Qualifications:
             if packet.get('collectionRepair'):
                 from qualification_collection_repair import verify_packet_archive
                 verify_packet_archive(packet)
+            if 'companion' in plan:
+                from qualification_companion import verify_packet
+                verify_packet(self, plan, packet)
             return packet
         folder = self.local / 'qualifications' / identity
         if row['status'] != 'running' or not (folder / 'child-exit.json').is_file():
@@ -425,6 +443,10 @@ class Qualifications:
         packet['collectionFindings'] = self.collection_findings(state_path.parent)
         # This is evidence for operator/tool-chat review, never automatic platform acceptance.
         self.qualification_verify(row, authority=False)
+        if 'companion' in plan:
+            from qualification_companion import collect as collect_companion
+            packet['toolCompanion'] = collect_companion(self, plan, state_path.parent)
+            packet['files'].extend(packet['toolCompanion']['pins'])
         if (folder / 'collection-repair.json').exists():
             from qualification_collection_repair import evidence_pins
             packet['collectionRepair'] = m.read(folder / 'collection-repair.json')
@@ -451,6 +473,10 @@ class Qualifications:
     def qualification_successful_result(plan, packet):
         """Allow declared tool observations, without converting them into passed assertions."""
         m = api()
+        if 'companion' in plan:
+            from qualification_companion import successful
+            if not successful(plan, packet):
+                return False
         if packet.get('kind') == 'qualification-held-diagnostic':
             return False
         projection = packet.get('testResult', {})
