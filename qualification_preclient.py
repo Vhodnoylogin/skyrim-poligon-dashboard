@@ -12,6 +12,7 @@ from qualification_diagnostic import archive_inventory, verify_archive
 from qualification_pre_native import _identity, _pin
 
 KIND = 'qualification-preclient-diagnostic'
+STARTUP_KIND = 'qualification-startup-diagnostic'
 
 
 def api():
@@ -119,14 +120,53 @@ def verify_prefix(plan, folder, state_path):
             'component action exists or known single owner finish missing')
     require(isinstance(delivered[0].get('commandId'), str) and re.fullmatch('[0-9a-f]{32}', delivered[0]['commandId']),
             'known owner finish command UUID required')
-    return {'report': report, 'state': state, 'client': ident, 'names': names, 'finish': delivered[0]['commandId']}
+    return {'report': report, 'reason': report['reason'], 'state': state, 'client': ident, 'names': names, 'finish': delivered[0]['commandId']}
 
 
-def record(p, identity, review_path):
+def verify_startup_prefix(plan, folder, state_path):
+    """Guardian-ended startup before the source-defined client admission gate."""
+    m = api(); folder, state_path = Path(folder), Path(state_path)
+    state, result = m.read(state_path), m.read(state_path.parent / 'result.json')
+    expected = 'qualification-' + plan['id']; worker = _identity(m.read(folder / 'worker.json').get('identity'))
+    game = _identity(state.get('game'))
+    require(state_path == Path(plan['configuration']['runtime']) / 'runs' / state['id'] / 'state.json' and
+            state.get('order', {}).get('id') == expected and state.get('runner') == worker and
+            any(x.get('role') == 'game' and x.get('identity') == game for x in state.get('owned', [])), 'native startup attribution differs')
+    require(state.get('done') is True and state.get('restored') is True and not state.get('restoreErrors') and
+            state.get('collectionComplete') is True and not state.get('collectionErrors') and
+            result.get('id') == state['id'] and result.get('restored') is True and not result.get('restoreErrors') and
+            result.get('result') == state.get('result') == 'failed', 'ended failed startup and completed restoration required')
+    recovery = state.get('guardianRecovery', {})
+    require(isinstance(recovery.get('trigger'), str) and recovery['trigger'] and
+            recovery.get('prior', {}).get('phase') in {'wait-devbench', 'se-native-startup-events', 'wait-task-queue'} and
+            state.get('phase') == 'stop-and-restore', 'only the reviewed guardian-ended pre-world startup is supported')
+    child = m.read(folder / 'child-exit.json')
+    require(set(child) == {'returncode'} and type(child['returncode']) is int and child['returncode'] == 125,
+            'exact native termination exit125 required')
+    require(not state.get('interactiveSession') and not state.get('gameplayBootstrap') and
+            not state.get('interactiveArtifacts') and not state.get('interactiveActorFixtures'), 'interactive or world-ready ownership was reached')
+    root = folder / 'subject-companion'; manifest = root / 'executor-manifest.json'
+    require(root.is_dir() and [x.name for x in root.iterdir()] == ['executor-manifest.json'] and
+            m.read(manifest) == {'schemaVersion': 1, 'files': plan['executorPins']},
+            'client output or unexpected helper artifacts exist; never infer a missing client identity')
+    steps = [json.loads(line) for line in (state_path.parent / 'steps.jsonl').read_text(encoding='utf-8').splitlines()]
+    forbidden = {'interactive-ready', 'interactive-action-delivered', 'gameplay-ready', 'bootstrap-completed'}
+    require(not any(x.get('kind') in forbidden or x.get('commandId') for x in steps), 'subject/client action or readiness evidence exists')
+    phases = [x.get('name') for x in steps if x.get('kind') == 'phase']
+    require(phases and phases[-1] == 'stop-and-restore' and all(x in {
+        'snapshot', 'start-mo2', 'start-skse', 'wait-devbench', 'se-native-startup-events', 'wait-task-queue', 'stop-and-restore'} for x in phases),
+        'native progressed beyond the source-defined startup gate')
+    names = [x['name'] for x in m.read(plan['companion']['plan']['path'])['checks']]
+    for name in ('plan', 'sequencer', 'transport'): _pin(plan['companion'][name])
+    return {'report': None, 'reason': state.get('reason') or recovery['trigger'], 'state': state, 'client': None,
+            'names': names, 'finish': None}
+
+
+def record(p, identity, review_path, *, startup=False):
     m = api(); review_path = Path(review_path).resolve(); review_hash = m.digest(review_path); review = m.read(review_path)
-    require(review.get('schemaVersion') == 1 and review.get('kind') == 'qualification-preclient-review' and
+    require(review.get('schemaVersion') == 1 and review.get('kind') == ('qualification-startup-review' if startup else 'qualification-preclient-review') and
             review.get('qualificationId') == identity and all(review.get(k) is True for k in
-             ('nativeCompletionReviewed', 'restorationReviewed', 'archiveReviewed', 'preclientFailureReviewed', 'retainHold')),
+             ('nativeCompletionReviewed', 'restorationReviewed', 'archiveReviewed', 'startupFailureReviewed' if startup else 'preclientFailureReviewed', 'retainHold')),
             'explicit collection-only operator review required')
     for k in ('verifiedBy', 'summary'): m.required_string(review, k)
     require(review.get('implementationPins') == implementation_pins(), 'current reviewed implementation differs')
@@ -144,10 +184,12 @@ def record(p, identity, review_path):
         runs = [s for s in (Path(plan['configuration']['runtime']) / 'runs').glob('*/state.json')
                 if m.read(s).get('order', {}).get('id') == 'qualification-' + identity]
         require(len(runs) == 1, 'one exact native run required')
-        state_path = runs[0]; checked = verify_prefix(plan, folder, state_path); state = checked['state']
+        state_path = runs[0]
+        checked = (verify_startup_prefix if startup else verify_prefix)(plan, folder, state_path); state = checked['state']
         exact_paths = {'plan': folder / 'plan.json', 'state': state_path, 'result': state_path.parent / 'result.json',
-            'report': folder / 'subject-companion/report.json', 'dispatch': folder / 'subject-companion/dispatch.json',
             'childExit': folder / 'child-exit.json', 'worker': folder / 'worker.json'}
+        if not startup:
+            exact_paths.update(report=folder / 'subject-companion/report.json', dispatch=folder / 'subject-companion/dispatch.json')
         for key, path in exact_paths.items(): _pin(review[key], path)
         require(p.native_game_starts(state) == 1, 'exactly one consumed physical start required')
         archive = state_path.parent / 'test-profile'; archived, directories = archive_inventory(archive)
@@ -165,10 +207,10 @@ def record(p, identity, review_path):
                         m.digest(snapshot['backup']) == snapshot['sha256'], 'restored target or original backup hash differs')
             restoration.append({'path': str(path), 'exists': snapshot['exists'], 'sha256': snapshot.get('sha256')})
         require(restoration, 'tracked restoration inventory required')
-        identities = [state['runner'], checked['client'], state['game']] + [x['identity'] for x in state['owned']]
+        identities = [state['runner']] + ([checked['client']] if checked['client'] is not None else []) + [state['game']] + [x['identity'] for x in state['owned']]
         identities = list({json.dumps(value, sort_keys=True): value for value in identities}.values())
         _native_dead(plan, identities)
-        output = folder / 'preclient-diagnostic'; require(not output.exists(), 'diagnostic is immutable')
+        output = folder / ('startup-diagnostic' if startup else 'preclient-diagnostic'); require(not output.exists(), 'diagnostic is immutable')
         files = []
         for directory in (folder, state_path.parent):
             for path in sorted(directory.rglob('*')):
@@ -189,36 +231,40 @@ def record(p, identity, review_path):
         files.extend(plan['executorPins']); files.extend(review['implementationPins'])
         files.append({'path': str(review_path), 'sha256': m.digest(review_path)})
         files = sorted({x['path']: x for x in files}.values(), key=lambda x: x['path'])
-        packet = {'schemaVersion': 1, 'kind': KIND, 'id': identity, 'orderId': plan['orderData']['id'],
+        packet = {'schemaVersion': 1, 'kind': STARTUP_KIND if startup else KIND, 'id': identity, 'orderId': plan['orderData']['id'],
             'sourceThreadId': plan['orderData']['sourceThreadId'], 'runDirectory': str(state_path.parent),
             'attemptId': 'qualification-' + identity, 'actualGameStarts': 1,
             'cumulativeActualGameStartsBefore': plan['cumulativeActualGameStartsBefore'],
             'cumulativeActualGameStartsAfter': None if plan['cumulativeActualGameStartsBefore'] is None else plan['cumulativeActualGameStartsBefore']+1,
-            'restored': True, 'collectionFinished': True, 'testingStarted': False, 'executionOutcome': 'passed',
-            'qualificationOutcome': 'not_conducted', 'reason': checked['report']['reason'], 'retainHold': True,
+            'restored': True, 'collectionFinished': True, 'testingStarted': False, 'executionOutcome': state['result'],
+            'qualificationOutcome': 'not_conducted', 'reason': checked['reason'], 'retainHold': True,
             'globalProviderQualified': False, 'subjectModAccepted': False, 'physicsQualified': False,
             'componentCoverage': [{'name': name, 'result': 'not_run'} for name in checked['names']],
-            'clientRunIdentityAvailable': False, 'nativeAttributionBasis': 'native state and retained client argv; report identity fields remain absent',
+            'clientRunIdentityAvailable': False, 'nativeAttributionBasis': ('native startup state, phase log and unchanged source-defined admission gate; no client report or identity fabricated'
+                if startup else 'native state and retained client argv; report identity fields remain absent'),
             'ownerFinishCommandId': checked['finish'], 'recordedRestoration': restoration,
             'retainedOriginalPins': retained_originals,
             'profileArchivePins': archived, 'profileArchiveDirectories': directories, 'files': files}
         m.write(output / 'packet.json', packet)
         con.execute("UPDATE qualifications SET status='recorded',packet=? WHERE id=?", (json.dumps({'path': str(output / 'packet.json'), 'sha256': m.digest(output / 'packet.json')}), identity))
-        p.event(con, identity, 'preclient_diagnostic_recorded', 'No components tested; original hold and physical count retained')
+        p.event(con, identity, 'startup_diagnostic_recorded' if startup else 'preclient_diagnostic_recorded',
+                'No components tested; original hold and physical count retained')
         return packet
 
 
 def verify_packet(p, plan, packet):
-    require(packet.get('kind') == KIND and packet.get('id') == plan['id'] and packet.get('retainHold') is True and
+    require(packet.get('kind') in (KIND, STARTUP_KIND) and packet.get('id') == plan['id'] and packet.get('retainHold') is True and
             packet.get('qualificationOutcome') == 'not_conducted' and packet.get('testingStarted') is False and
             packet.get('actualGameStarts') == 1 and packet.get('globalProviderQualified') is False, 'diagnostic claims changed')
     folder = p.local / 'qualifications' / plan['id']; run = Path(packet['runDirectory'])
-    checked = verify_prefix(plan, folder, run / 'state.json')
+    startup = packet['kind'] == STARTUP_KIND
+    checked = (verify_startup_prefix if startup else verify_prefix)(plan, folder, run / 'state.json')
     require(packet.get('componentCoverage') == [{'name': n, 'result': 'not_run'} for n in checked['names']] and
             packet.get('ownerFinishCommandId') == checked['finish'], 'diagnostic coverage changed')
     originals = packet.get('retainedOriginalPins', [])
     require([(x['originalPath'], x['sha256']) for x in originals] == [(x['path'], x['sha256']) for x in plan['pins']], 'retained original inventory differs')
     for row in originals:
         file = Path(row['retainedPath'])
-        require(file.is_relative_to(folder / 'preclient-diagnostic/original-inputs') and api().digest(file) == row['sha256'], 'retained original bytes differ')
+        require(file.is_relative_to(folder / ('startup-diagnostic' if startup else 'preclient-diagnostic') / 'original-inputs') and
+                api().digest(file) == row['sha256'], 'retained original bytes differ')
     verify_archive(packet)

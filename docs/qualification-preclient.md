@@ -44,3 +44,23 @@ unknown-total diagnostic without converting its cumulative count to zero.
 A future test requires its own current, finite, independently reviewed admission
 and exact repaired candidate; this command creates none. Old packets and launch
 counts are never rewritten or reopened.
+
+## Guardian-ended startup with no client
+
+`qualification-record-startup ID REVIEW.json` is a separate, narrower prefix
+case. Use kind `qualification-startup-review` and true startupFailureReviewed
+in place of preclientFailureReviewed. Pin plan/state/result/childExit/worker;
+there is no report or dispatch to pin or manufacture. All other review, source,
+restoration/archive/death and hold-retention requirements above still apply.
+
+This path accepts only an exact exit125 guardian-ended failed startup whose
+prior phase is wait-devbench, se-native-startup-events or wait-task-queue. No
+completed bootstrap, interactive owner, artifact/actor registry, command delivery
+or later phase may exist. The helper folder must contain only the exact executor
+manifest, consistent with the unchanged source's pre-readiness admission gate.
+Partial client output, unknown processes, a successful client or another exit
+shape refuse recording. It records qualification-startup-diagnostic, failed
+native execution, zero component actions, every original case not_run and one
+consumed start. ownerFinishCommandId remains null; no client/report fields are
+invented. Normal release refuses the kind. Its recorded unknown-total history
+may be retained by a separate new qualification without resetting that history.
