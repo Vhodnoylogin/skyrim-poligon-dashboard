@@ -79,5 +79,14 @@ class CompanionWindowTests(unittest.TestCase):
                 self.configure(wall, maximum)
                 with self.assertRaisesRegex(ValueError, 'reserves'): self.validate()
 
+    def test_remaining_deadline_refuses_before_running_row_or_child(self):
+        f = self.f; f.request['deadlineUtc'] = time.time() + 650; f.register()
+        with patch('qualification.subprocess.run') as child:
+            with self.assertRaisesRegex(ValueError, 'Original owner deadline'): f.p.qualification_check('candidate-one')
+            with self.assertRaisesRegex(ValueError, 'Original owner deadline'): f.p.qualification_run('candidate-one')
+        child.assert_not_called()
+        self.assertEqual(f.p.qualification_show('candidate-one')['status'], 'prepared')
+        self.assertFalse((f.p.local / 'qualifications/candidate-one').exists())
+
 
 if __name__ == '__main__': unittest.main()

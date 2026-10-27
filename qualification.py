@@ -287,6 +287,7 @@ class Qualifications:
         m = api()
         row = self.qualification_show(identity)
         plan = self.qualification_verify(row)
+        self.qualification_check_remaining_window(plan)
         with self.connect() as con:
             con.execute('BEGIN IMMEDIATE')
             if con.execute('SELECT status FROM qualifications WHERE id=?', (identity,)).fetchone()[0] != 'prepared':
@@ -315,13 +316,22 @@ class Qualifications:
 
     def qualification_check(self, identity):
         m = api()
-        self.qualification_verify(self.qualification_show(identity))
+        plan = self.qualification_verify(self.qualification_show(identity))
+        self.qualification_check_remaining_window(plan)
         child = subprocess.run([sys.executable, str(m.HERE / 'polygon.py'), '--root', str(self.root),
                                 '_check-qualification', identity], capture_output=True, text=True, timeout=30,
                                env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
         if child.returncode:
             raise ValueError('Candidate offline validation refused: ' + child.stdout + child.stderr)
         return {'id': identity, 'validated': True, 'launched': False}
+
+    @staticmethod
+    def qualification_check_remaining_window(plan):
+        if 'companion' in plan:
+            from qualification_companion import STARTUP_RESERVE_SECONDS, RESTORATION_RESERVE_SECONDS
+            required = plan['companion']['maximumSeconds'] + STARTUP_RESERVE_SECONDS + RESTORATION_RESERVE_SECONDS
+            if min(plan['maximumWallSeconds'], plan['deadlineUtc'] - time.time()) < required:
+                raise ValueError('Original owner deadline cannot fit declared companion plus startup/restoration before dispatch')
 
     def child_qualification_check(self, identity):
         plan = self.qualification_verify(self.qualification_show(identity))
@@ -440,6 +450,17 @@ class Qualifications:
             for pin in packet['files']:
                 if m.digest(pin['path']) != pin['sha256']:
                     raise ValueError('Qualification evidence changed')
+            if packet.get('kind') == 'qualification-pre-native-result':
+                with self.connect() as con:
+                    prior = con.execute('SELECT packet,review FROM qualification_pre_native WHERE id=?', (identity,)).fetchone()
+                if (not prior or json.loads(prior['packet']) != retained or packet.get('id') != identity or
+                        type(packet.get('actualGameStarts')) is not int or packet['actualGameStarts'] != 0 or
+                        packet.get('testingStarted') is not False or packet.get('runDirectory') is not None or
+                        packet.get('restored') is not None or packet.get('restorationBasis') != 'not_required_no_mutation'):
+                    raise ValueError('Authoritative exact pre-native zero-start reconciliation required')
+                review = json.loads(prior['review'])
+                if m.digest(review['path']) != review['sha256']: raise ValueError('Pre-native review changed')
+                return packet
             if packet.get('kind') in ('qualification-preclient-diagnostic', 'qualification-startup-diagnostic', 'qualification-prebinding-diagnostic'):
                 from qualification_preclient import verify_packet
                 verify_packet(self, plan, packet)

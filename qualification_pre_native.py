@@ -34,6 +34,14 @@ SOURCE_PREFIX = [
     'pinned preflight required-file loop raises missing sksevr_loader.exe before setup',
     'original polygon.main emits only the refusal JSON and child exits 2',
 ]
+WINDOW_CASE = 'companion-original-window-before-native-start'
+WINDOW_ERROR = 'Qualification companion: original outer window cannot fit declared companion plus restoration before native start'
+SUPPORTED_WINDOW_DASHBOARD = {
+    'polygon.py': 'c7e2935ea56eccd282c46bcffde81d74158a79d97d342631d5dd02d256bbe3d5',
+    'qualification.py': '580250fea8f8124ad450ae91ebf712ea2dd37d39ffe5f826167b716f64ae28dc',
+    'qualification_companion.py': '72f777b5fbcf2a94558d193836ae20f1eb264ded5b3155f05c1a2af29854ce55'}
+SUPPORTED_WINDOW_DASHBOARD_INVENTORY = '630f7a46ad77df60d9e73dc86575d11a6f6ad2ff1cd4ccc3ee2f4a0e377ccb5b'
+SUPPORTED_WINDOW_CANDIDATE_INVENTORY = 'df1aca97caf9f46d9037b6f6127768e3b882e79e716c9e311e3f372aab0cfbe3'
 MAX_FILES = 100000
 MAX_SETTINGS_JSON = 1024 * 1024
 
@@ -378,7 +386,8 @@ def _fresh_native(runner, worker, config, profile):
             raise ValueError('Live MO2 bridge health/idleness is unavailable')
         if ping.get('profile') != profile:
             raise ValueError('Live active profile changed')
-        if ping.get('game') != 'SkyrimVR' or _absolute(ping.get('modsPath')) != _absolute(config['mods']):
+        expected_game = 'SkyrimSE' if config.get('game_edition', 'vr') == 'se' else 'SkyrimVR'
+        if ping.get('game') != expected_game or _absolute(ping.get('modsPath')) != _absolute(config['mods']):
             raise ValueError('Live MO2 bridge game/mods path differs')
         procs = runner.request(config['bridge_port'], 'procs', token=token, timeout=3)
         if (type(procs) is not dict or 'busy' not in procs
@@ -436,6 +445,100 @@ def _runtime_checks(plan, host):
     return result
 
 
+def _checked_window(p, identity, review_path, review, row, plan, folder, plan_path, con):
+    """One exact pinned guard failure before thread/client/native-run admission."""
+    m = _api(); flow = review.get('sourceFlow')
+    if (type(flow) is not dict or set(flow) != {'case', 'executedDashboardRoot'} or
+            flow['case'] != WINDOW_CASE or review.get('proofMode') != 'executed-window-guard-prefix' or 'protectedBaseline' in review or
+            plan['configuration'].get('game_edition') != 'se' or not plan.get('companion')):
+        raise ValueError('Exact SE pre-runner window guard source review required')
+    root = _absolute(flow['executedDashboardRoot'])
+    original_pins = [pin for pin in plan['pins'] if Path(pin['path']).parent == root and Path(pin['path']).suffix == '.py']
+    indexed = {Path(pin['path']).name: pin['sha256'] for pin in original_pins}
+    if (any(indexed.get(name) != digest for name, digest in SUPPORTED_WINDOW_DASHBOARD.items()) or
+            source_inventory_digest(original_pins, root) != SUPPORTED_WINDOW_DASHBOARD_INVENTORY or
+            source_inventory_digest(plan['executorPins'], Path(plan['executor'])) != SUPPORTED_WINDOW_CANDIDATE_INVENTORY or
+            inventory(plan['executor']) != plan['executorPins'] or review.get('implementationPins') != implementation_pins()):
+        raise ValueError('Only the exact reviewed window-refusal Dashboard/candidate inventory is supported')
+    retained = []
+    expected = {'worker.json', 'child-exit.json', 'dispatch-intent.json', 'executor.log',
+                'profile-selection.json', 'plan.json', 'config.json', 'scenario.json', 'subject-companion'}
+    if (set(x.name for x in folder.iterdir()) - {'pre-native-packet.json', 'pre-native-finish.json'} != expected or
+            not (folder / 'subject-companion').is_dir() or
+            {x.name for x in (folder / 'subject-companion').iterdir()} != {'executor-manifest.json'}):
+        raise ValueError('Unexpected native/client/launch artifacts prohibit zero-start window proof')
+    files = {name: folder / name for name in expected if name != 'subject-companion'}
+    files['executor-manifest.json'] = folder / 'subject-companion/executor-manifest.json'
+    if set(review.get('evidence', {})) != set(files):
+        raise ValueError('Complete original pre-runner window artifacts required')
+    for name, file in files.items(): _pin(review['evidence'][name], file)
+    if (m.read(folder / 'config.json') != plan['configuration'] or m.read(folder / 'scenario.json') != plan['scenario'] or
+            m.read(folder / 'subject-companion/executor-manifest.json') != {'schemaVersion': 1, 'files': plan['executorPins']} or
+            m.read(folder / 'child-exit.json') != {'returncode': 2} or
+            m.read(folder / 'executor.log') != {'error': WINDOW_ERROR}):
+        raise ValueError('Only the original exact exit2 window guard refusal is supported')
+    dispatch = m.read(folder / 'dispatch-intent.json')
+    admission = review.get('admission'); _guard_db(p, con, identity, admission)
+    if (set(dispatch) != {'id', 'at', 'expires'} or dispatch['id'] != identity or
+            any(type(dispatch[key]) not in (int, float) or not math.isfinite(dispatch[key]) for key in ('at', 'expires')) or
+            dispatch['expires'] != row['expires'] or type(admission['started']) not in (int, float) or
+            not math.isfinite(admission['started']) or admission['started'] < dispatch['at'] or
+            row['expires'] - admission['started'] >= plan['companion']['maximumSeconds'] + 60):
+        raise ValueError('Original admission chronology does not prove the pre-native window refusal')
+    normalization = review.get('postRefusalNormalization')
+    normalized = False
+    for pin in plan['pins'] + plan['executorPins']:
+        if (Path(pin['path']) == Path(plan['configuration']['mo2_ini']) and normalization is not None):
+            if (type(normalization) is not dict or set(normalization) != {'path', 'originalSha256', 'currentSha256', 'managerCloseReceipt'} or
+                    normalization['path'] != pin['path'] or normalization['originalSha256'] != pin['sha256'] or
+                    _hash(pin['path']) != normalization['currentSha256']):
+                raise ValueError('Only exact separately reviewed post-refusal MO2 settings normalization is supported')
+            close_path = _pin(normalization['managerCloseReceipt']); close = m.read(close_path)
+            manager = _identity(close.get('identity')); session = close.get('session', {}); procs = close.get('idleProcesses', {})
+            if (Path(manager['path']) != Path(plan['configuration']['mo2_exe']) or
+                    manager['birth'] / 10000000 - 11644473600 <= admission['started'] or
+                    session.get('mo2Pid') != manager['pid'] or not session.get('serverBootId') or not session.get('instanceId') or
+                    Path(session.get('profilesPath', '')) != Path(plan['configuration']['profiles']) or
+                    close.get('profile') != plan['orderData']['profile'] or close.get('normalExitObserved') is not True or
+                    procs.get('serverBootId') != session['serverBootId'] or procs.get('procs') != [] or
+                    procs.get('launchedByMO2') != [] or type(procs.get('running')) is not int or procs['running'] != 0 or
+                    'busy' not in procs or not (procs['busy'] is None or procs['busy'] is False)):
+                raise ValueError('Exact post-refusal reopened manager and normal-close receipt required')
+            retained.extend([Path(pin['path']), close_path]); normalized = True
+        else:
+            retained.append(_pin(pin))
+    if normalization is not None and not normalized:
+        raise ValueError('Normalization review does not bind an original MO2 settings pin')
+    worker = _identity(m.read(folder / 'worker.json').get('identity'))
+    if m.read(folder / 'profile-selection.json') != {'sourceProfile': plan['orderData']['profile'], 'selection': {'mode': 'active'},
+            'copyOwner': 'skyrim-autotest', 'originalProfilePreserved': True}:
+        raise ValueError('Original active source profile selection differs')
+    audit_path = _pin(review['executedControlFlowAudit']); audit = m.read(audit_path)
+    if (audit.get('schemaVersion') != 1 or audit.get('kind') != 'qualification-window-prefix-audit' or
+            audit.get('qualificationId') != identity or audit.get('worker') != worker or
+            audit.get('sourceFlow') != flow or audit.get('executedSourceHashes') != SUPPORTED_WINDOW_DASHBOARD or
+            audit.get('candidateInventorySha256') != SUPPORTED_WINDOW_CANDIDATE_INVENTORY or
+            audit.get('guardBeforeThreadClientAndNativeRunReviewed') is not True):
+        raise ValueError('Independent pinned executed window-prefix audit required')
+    operator_path = _pin(audit['operatorScript'])
+    if not audit.get('verifiedBy') or not audit.get('summary'):
+        raise ValueError('Executed window-prefix audit requires an actual operator review')
+    runtimes = _runtime_checks(plan, p.host())
+    config = plan['configuration']
+    scopes = {'profile': Path(config['profiles']) / plan['orderData']['profile'], 'mo2Settings': Path(config['mo2_ini']),
+              'overwrite': Path(config['overwrite']), 'gameExecutable': Path(config['game']) / 'SkyrimSE.exe',
+              'loader': Path(config['game']) / 'skse64_loader.exe'}
+    runtimes['stateProof'] = {'proofMode': 'executed-window-guard-prefix',
+        'noMutationProof': 'no_game_runner_or_client_entered_proven_by_exact_executed_source_guard',
+        'originalGlobalStateComparison': 'not_attested',
+        'freshSafetyInventory': {key: protected_inventory(path) for key, path in scopes.items()}}
+    if normalization is not None: runtimes['stateProof']['postRefusalNormalization'] = normalization
+    retained.extend([plan_path, review_path, audit_path, operator_path, Path(review['ownerAuthorization']['path'])])
+    retained.extend(files.values()); retained.extend(Path(pin['path']) for pin in review['implementationPins'])
+    pins = [{'path': str(path), 'sha256': _hash(path)} for path in sorted(set(retained))]
+    return row, plan, review, worker, runtimes, pins
+
+
 def _checked(p, identity, review_path, con, allowed_status):
     m = _api()
     review_path = _absolute(str(review_path))
@@ -458,6 +561,8 @@ def _checked(p, identity, review_path, con, allowed_status):
     plan_path = _pin(review['plan'], folder / 'plan.json')
     if m.read(plan_path) != plan:
         raise ValueError('Frozen plan and durable request differ')
+    if review.get('sourceFlow', {}).get('case') == WINDOW_CASE:
+        return _checked_window(p, identity, review_path, review, row, plan, folder, plan_path, con)
     retained = _original_sources(plan, review, plan_path)
     runner_path = Path(plan['executor']) / 'skyrim_autotest/runner.py'
     if (_hash(runner_path) != SUPPORTED_RUNNER_SHA256 or

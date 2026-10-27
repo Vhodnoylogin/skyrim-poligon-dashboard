@@ -253,3 +253,31 @@ Fresh inventories are current safety observations only. Finish rejects changes
 since reconciliation-time safety observation. That later comparison is not a
 pre-dispatch baseline or historical global-state equality proof. Zero starts and
 absence of this attempt's mutation come from the audited executed prefix.
+
+## Companion window refused before the native runner
+
+The same reconciliation/finish commands support one separately pinned SE prefix,
+`sourceFlow.case: companion-original-window-before-native-start`. The exact059
+Dashboard and candidate inventories are allowlisted in source. Original exit2,
+the exact outer-window error, worker/admission/dispatch chronology, unchanged
+plan/config/scenario/profile receipt and a helper containing only its executor
+manifest are required. An independently pinned executed-source audit binds the
+original operator script and proves the guard precedes thread creation, client
+admission and `run_native`. Any launch/client/native artifact or another source,
+error or timing shape refuses recording. Missing state alone proves nothing.
+
+Use `proofMode: executed-window-guard-prefix` and the ordinary pre-native review
+flags/owner evidence. `executedControlFlowAudit` and exact original `evidence`
+pins are mandatory. Fresh current profile/settings/overwrite/binary inventories
+are retained as safety observations, with historical equality explicitly
+`not_attested`. A separately reviewed post-refusal reopening/normal closure may
+explain only the configured MO2 INI changing: retain its original/current hashes
+and exact idle-manager/normal-close receipt in `postRefusalNormalization`.
+No other original input changes are accepted; no file is rolled back or repinned.
+
+Reconciliation retains the original hold and actual admission, records zero
+starts and keeps a null cumulative baseline null. Separate reviewed finish alone
+removes that reservation. This grants no retry or new start. New companion
+`qualification-check`/`qualification-run` calls now check remaining original
+deadline against declared companion plus startup/restoration reserves before
+dispatch; later native verification never repeats that startup-only admission.
