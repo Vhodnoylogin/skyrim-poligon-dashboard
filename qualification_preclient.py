@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 import subprocess
@@ -13,6 +14,7 @@ from qualification_pre_native import _identity, _pin
 
 KIND = 'qualification-preclient-diagnostic'
 STARTUP_KIND = 'qualification-startup-diagnostic'
+PREBINDING_KIND = 'qualification-prebinding-diagnostic'
 
 
 def api():
@@ -48,7 +50,7 @@ print(json.dumps({'noGame':True}))
     require(r.returncode == 0 and r.stdout.strip() == '{"noGame": true}', 'fresh complete idle inventory required')
 
 
-def verify_prefix(plan, folder, state_path):
+def verify_prefix(plan, folder, state_path, *, prebinding=False):
     """Reject an initialized client, lost action ACK or any component delivery."""
     m = api(); folder, state_path = Path(folder), Path(state_path)
     state, result = m.read(state_path), m.read(state_path.parent / 'result.json')
@@ -62,17 +64,23 @@ def verify_prefix(plan, folder, state_path):
             'exact game must belong to this native owner')
     require(state.get('done') is True and state.get('restored') is True and not state.get('restoreErrors') and
             state.get('collectionComplete') is True and not state.get('collectionErrors') and
-            result.get('id') == state['id'] and result.get('result') == state.get('result') == 'passed' and
+            result.get('id') == state['id'] and result.get('result') == state.get('result') == ('failed' if prebinding else 'passed') and
             result.get('restored') is True and not result.get('restoreErrors'), 'ended collected native restoration required')
-    require(state.get('gameplayBootstrap', {}).get('completed') is True and
-            state.get('interactiveSession', {}).get('ready') is False and
-            state['interactiveSession'].get('reason') == 'owner-finished', 'known common bootstrap and owner finish required')
-    require(m.read(folder / 'child-exit.json') == {'returncode': 0}, 'normal native child exit required')
+    if prebinding:
+        require(state.get('gameplayBootstrap', {}).get('completed') is True and
+                state.get('interactiveSession', {}).get('ready') is True and state.get('phase') == 'stop-and-restore',
+                'known initialized native world and ended guardian recovery required')
+        require(m.read(folder / 'child-exit.json') == {'returncode': 125}, 'exact guardian-ended worker exit125 required')
+    else:
+        require(state.get('gameplayBootstrap', {}).get('completed') is True and
+                state.get('interactiveSession', {}).get('ready') is False and
+                state['interactiveSession'].get('reason') == 'owner-finished', 'known common bootstrap and owner finish required')
+        require(m.read(folder / 'child-exit.json') == {'returncode': 0}, 'normal native child exit required')
     require(report.get('schemaVersion') == 1 and report.get('kind') == 'subject-companion-report' and
             report.get('done') is True and report.get('status') == 'stopped' and report.get('completed') is False and
             report.get('uncertain') is False and report.get('subjectStarted') is False and report.get('subjectStart') is None and
             report.get('actions') == [] and report.get('evidence') == [] and report.get('actionsRetried') is False and
-            report.get('audioOpened') is False and report.get('errorType') == 'ConnectionRefusedError' and
+            report.get('audioOpened') is False and report.get('errorType') == ('CompanionError' if prebinding else 'ConnectionRefusedError') and
             isinstance(report.get('reason'), str) and report['reason'] and
             not any(key in report for key in ('runId', 'sessionId', 'binding', 'sequencerProcess')),
             'only the genuine pre-ready connection refusal with no action/inner process is supported')
@@ -116,11 +124,62 @@ def verify_prefix(plan, folder, state_path):
             'dispatcher native readiness observation differs')
     steps = [json.loads(line) for line in (state_path.parent / 'steps.jsonl').read_text(encoding='utf-8').splitlines()]
     delivered = [r for r in steps if r.get('kind') == 'interactive-action-delivered']
+    if prebinding:
+        verify_prebinding_recovery(state, report, dispatch, steps, state_path.parent, root)
+        return {'report': report, 'reason': report['reason'], 'state': state, 'client': ident,
+                'names': names, 'finish': None, 'failureMode': 'guardian-ended-before-client-binding'}
     require(len(delivered) == 1 and delivered[0].get('request') == {'schemaVersion': 1, 'operation': 'finish'},
             'component action exists or known single owner finish missing')
     require(isinstance(delivered[0].get('commandId'), str) and re.fullmatch('[0-9a-f]{32}', delivered[0]['commandId']),
             'known owner finish command UUID required')
     return {'report': report, 'reason': report['reason'], 'state': state, 'client': ident, 'names': names, 'finish': delivered[0]['commandId']}
+
+
+def verify_prebinding_recovery(state, report, dispatch, steps, run, root):
+    """One proved heartbeat refusal before channel claim/inner process/actions."""
+    m = api(); game, worker = state['game'], state['runner']
+    from companion_evidence import _path
+    _path(root / 'evidence')
+    require(report.get('reason') == 'Exact worker heartbeat is unavailable/stale' and
+            report.get('gameLifecycleOwned') is False and
+            {p.name for p in root.iterdir()} == {'report.json', 'dispatch.json', 'executor-manifest.json', 'events.jsonl', 'client.log', 'evidence'} and
+            (root / 'evidence').is_dir() and not any((root / 'evidence').iterdir()) and
+            not (run / 'subject-companion.claim.json').exists() and
+            not any(key in report for key in ('statePath', 'readyState', 'originResult', 'finishedAt')) and
+            not state.get('interactiveArtifacts') and not state.get('interactiveActorFixtures') and
+            not any(row.get('kind') == 'interactive-action-delivered' or row.get('commandId') for row in steps),
+            'prebinding prefix contains a claim, inner result, component action or unexpected artifacts')
+    recovery = state.get('guardianRecovery', {}); decision = recovery.get('decision', {}); timing = decision.get('timing', {})
+    require(recovery.get('trigger') == state.get('reason') == 'Runner exceeded its phase deadline or heartbeat limit' and
+            recovery.get('prior', {}).get('phase') == 'interactive-session' and
+            decision.get('id') == state['id'] and decision.get('runner') == worker and decision.get('game') == game and
+            decision.get('done') is False and decision.get('expired') is True and decision.get('ownerAlive') is False and
+            decision.get('gameAlive') is True and decision.get('action') == 'claim-recovery-mutex' and
+            decision.get('reasons') == timing.get('reasons') == ['runner-heartbeat-expired'] and
+            timing.get('phase') == 'interactive-session' and timing.get('pulse') is None,
+            'exact guardian heartbeat-recovery identity/decision required')
+    ready = [r for r in steps if r.get('kind') == 'interactive-ready']
+    metadata = state['interactiveSession']; deadline = dispatch['nativeRun'].get('interactiveDeadline')
+    started, recovered, pulse = report.get('startedAt'), decision.get('at'), m.read(run / 'heartbeat.json')
+    require(all(type(x) in (int, float) and math.isfinite(x) for x in (started, recovered, deadline, timing.get('at'), timing.get('deadline'), pulse.get('at'))) and
+            len(ready) == 1 and type(ready[0].get('at')) in (int, float) and
+            ready[0]['at'] <= started < recovered < deadline and timing['at'] == recovered and timing['deadline'] == deadline and
+            metadata.get('sessionId') == 'game-' + state['id'] and
+            metadata.get('binding') == {'provider': 'skyrim-autotest', 'conversationId': state['id'], 'agentId': 'owned-game-executor'} and
+            ready[0].get('sessionId') == metadata['sessionId'] and ready[0].get('binding') == metadata['binding'] and
+            pulse.get('schemaVersion') == 1 and pulse.get('id') == state['id'] and pulse.get('runner') == worker and
+            pulse.get('healthy') is True and pulse.get('error') is None and 0 <= recovered-pulse['at'] <= 10 and
+            pulse.get('recovery', {}).get('owned') == state.get('owned'),
+            'fresh exact retained heartbeat, admission and original deadline chronology required')
+    health = decision.get('health', {})
+    exits = [r for r in state.get('gameProcessObservations', []) if r.get('status') == 'exited']
+    require(health.get('ok') is True and health.get('pid') == game['pid'] and
+            type(health.get('frame')) is int and health['frame'] >= 0 and
+            exits and all(r.get('identityVerified') is True and r.get('identity') == game and
+                          r.get('expectedIdentity') == game and r.get('exitCodeAvailable') is True and
+                          type(r.get('exitCode')) is int and r['exitCode'] == 125 and
+                          r.get('exitCodeHex') == '0x0000007D' for r in exits),
+            'actual healthy owned game and observed forced exit125 required')
 
 
 def verify_startup_prefix(plan, folder, state_path):
@@ -185,36 +244,55 @@ def verify_startup_prefix(plan, folder, state_path):
             'failureMode': 'native-failed-before-client' if native_failure else 'guardian-ended-pre-world'}
 
 
-def verify_ended_technical_review(plan, folder, state_path, pin, checked):
+def verify_ended_technical_review(plan, folder, state_path, pin, checked, *, prebinding=False):
     """Pin the independent operator's raw inventory; it never replaces native proof."""
     m = api(); path = _pin(pin); review = m.read(path)
     require(review.get('schemaVersion') == 1 and review.get('qualificationId') == plan['id'] and
             Path(review.get('nativeRun', '')).resolve() == Path(state_path).parent.resolve() and
             review.get('nativeDoneRestoredCollected') is True and review.get('nativeResult') == 'failed' and
-            review.get('noClientReport') is True and review.get('componentActions') == 0 and
+            (prebinding or review.get('noClientReport') is True) and review.get('componentActions') == 0 and
             type(review.get('componentActions')) is int and type(review.get('componentChecksNotRun')) is int and
             review['componentChecksNotRun'] == len(checked['names']) and
-            review.get('workerExit') == {'returncode': 1} and
+            review.get('workerExit') == {'returncode': 125 if prebinding else 1} and
             type(review.get('gameExit')) is int and review['gameExit'] ==
                 next(row['exitCode'] for row in checked['state']['gameProcessObservations'] if row.get('status') == 'exited') and
             review.get('dispatch') == m.read(Path(folder) / 'subject-companion/dispatch.json'),
             'ended technical review attribution or no-client/no-action facts differ')
+    if prebinding:
+        report = checked['report']
+        expected = {key: report.get(key) for key in ('done', 'completed', 'status', 'reason', 'uncertain',
+                                                    'runId', 'binding', 'sessionId', 'cases')}
+        require(review.get('clientFailure') == expected and review.get('operatorFinishSubmitted') is False and
+                review.get('guardianRecovery') == checked['state']['guardianRecovery'] and
+                review.get('allExactOwnedProcessesDeadIncludingDebugger') is True,
+                'reviewed prebinding prefix/guardian/no-finish facts differ')
     raw = review.get('rawPins')
     require(isinstance(raw, list) and raw and len(raw) <= 100000, 'bounded reviewed raw inventory required')
     paths = []
-    for item in raw: paths.append(str(_pin(item)))
+    for item in raw:
+        if prebinding and isinstance(item, dict) and set(item) == {'path', 'sha256', 'bytes'}:
+            raw_path = _pin({key: item[key] for key in ('path', 'sha256')})
+            require(type(item['bytes']) is int and item['bytes'] >= 0 and raw_path.stat().st_size == item['bytes'],
+                    'reviewed raw byte count differs')
+        else:
+            raw_path = _pin(item)
+        paths.append(str(raw_path))
     critical = {str(Path(folder) / name) for name in ('plan.json', 'worker.json', 'child-exit.json',
                 'subject-companion/dispatch.json', 'subject-companion/executor-manifest.json')}
     critical.update(str(Path(state_path).parent / name) for name in ('state.json', 'result.json', 'steps.jsonl'))
+    if prebinding:
+        critical.update(str(Path(folder) / 'subject-companion' / name) for name in ('report.json', 'events.jsonl', 'client.log'))
+        critical.add(str(Path(state_path).parent / 'heartbeat.json'))
     require(len(paths) == len(set(paths)) and critical <= set(paths), 'duplicate or incomplete reviewed raw inventory')
     return {'path': str(path), 'sha256': m.digest(path)}
 
 
-def record(p, identity, review_path, *, startup=False):
+def record(p, identity, review_path, *, startup=False, prebinding=False):
     m = api(); review_path = Path(review_path).resolve(); review_hash = m.digest(review_path); review = m.read(review_path)
-    require(review.get('schemaVersion') == 1 and review.get('kind') == ('qualification-startup-review' if startup else 'qualification-preclient-review') and
+    require(not (startup and prebinding), 'one explicit collection mode required')
+    require(review.get('schemaVersion') == 1 and review.get('kind') == ('qualification-prebinding-review' if prebinding else 'qualification-startup-review' if startup else 'qualification-preclient-review') and
             review.get('qualificationId') == identity and all(review.get(k) is True for k in
-             ('nativeCompletionReviewed', 'restorationReviewed', 'archiveReviewed', 'startupFailureReviewed' if startup else 'preclientFailureReviewed', 'retainHold')),
+             ('nativeCompletionReviewed', 'restorationReviewed', 'archiveReviewed', 'prebindingFailureReviewed' if prebinding else 'startupFailureReviewed' if startup else 'preclientFailureReviewed', 'retainHold')),
             'explicit collection-only operator review required')
     for k in ('verifiedBy', 'summary'): m.required_string(review, k)
     require(review.get('implementationPins') == implementation_pins(), 'current reviewed implementation differs')
@@ -233,10 +311,11 @@ def record(p, identity, review_path, *, startup=False):
                 if m.read(s).get('order', {}).get('id') == 'qualification-' + identity]
         require(len(runs) == 1, 'one exact native run required')
         state_path = runs[0]
-        checked = (verify_startup_prefix if startup else verify_prefix)(plan, folder, state_path); state = checked['state']
+        checked = (verify_startup_prefix(plan, folder, state_path) if startup else
+                   verify_prefix(plan, folder, state_path, prebinding=prebinding)); state = checked['state']
         technical_review = None
-        if checked.get('failureMode') == 'native-failed-before-client':
-            technical_review = verify_ended_technical_review(plan, folder, state_path, review.get('endedTechnicalReview'), checked)
+        if prebinding or checked.get('failureMode') == 'native-failed-before-client':
+            technical_review = verify_ended_technical_review(plan, folder, state_path, review.get('endedTechnicalReview'), checked, prebinding=prebinding)
         exact_paths = {'plan': folder / 'plan.json', 'state': state_path, 'result': state_path.parent / 'result.json',
             'childExit': folder / 'child-exit.json', 'worker': folder / 'worker.json'}
         if not startup:
@@ -263,7 +342,7 @@ def record(p, identity, review_path, *, startup=False):
         identities = [state['runner']] + ([checked['client']] if checked['client'] is not None else []) + [state['game']] + [x['identity'] for x in state['owned']]
         identities = list({json.dumps(value, sort_keys=True): value for value in identities}.values())
         _native_dead(plan, identities)
-        output = folder / ('startup-diagnostic' if startup else 'preclient-diagnostic'); require(not output.exists(), 'diagnostic is immutable')
+        output = folder / ('prebinding-diagnostic' if prebinding else 'startup-diagnostic' if startup else 'preclient-diagnostic'); require(not output.exists(), 'diagnostic is immutable')
         files = []
         for directory in (folder, state_path.parent):
             for path in sorted(directory.rglob('*')):
@@ -285,7 +364,7 @@ def record(p, identity, review_path, *, startup=False):
         files.append({'path': str(review_path), 'sha256': m.digest(review_path)})
         if technical_review: files.append(technical_review)
         files = sorted({x['path']: x for x in files}.values(), key=lambda x: x['path'])
-        packet = {'schemaVersion': 1, 'kind': STARTUP_KIND if startup else KIND, 'id': identity, 'orderId': plan['orderData']['id'],
+        packet = {'schemaVersion': 1, 'kind': PREBINDING_KIND if prebinding else STARTUP_KIND if startup else KIND, 'id': identity, 'orderId': plan['orderData']['id'],
             'sourceThreadId': plan['orderData']['sourceThreadId'], 'runDirectory': str(state_path.parent),
             'attemptId': 'qualification-' + identity, 'actualGameStarts': 1,
             'cumulativeActualGameStartsBefore': plan['cumulativeActualGameStartsBefore'],
@@ -294,7 +373,8 @@ def record(p, identity, review_path, *, startup=False):
             'qualificationOutcome': 'not_conducted', 'reason': checked['reason'], 'retainHold': True,
             'globalProviderQualified': False, 'subjectModAccepted': False, 'physicsQualified': False,
             'componentCoverage': [{'name': name, 'result': 'not_run'} for name in checked['names']],
-            'clientRunIdentityAvailable': False, 'nativeAttributionBasis': ('native startup state, phase log and unchanged source-defined admission gate; no client report or identity fabricated'
+            'clientRunIdentityAvailable': False, 'nativeAttributionBasis': ('known native interactive admission and exact client argv/exit; genuine report has no binding/inner/action and no finish is fabricated'
+                if prebinding else 'native startup state, phase log and unchanged source-defined admission gate; no client report or identity fabricated'
                 if startup else 'native state and retained client argv; report identity fields remain absent'),
             'ownerFinishCommandId': checked['finish'], 'recordedRestoration': restoration,
             'retainedOriginalPins': retained_originals,
@@ -302,29 +382,41 @@ def record(p, identity, review_path, *, startup=False):
         if startup:
             packet['startupFailureMode'] = checked['failureMode']
             if technical_review: packet['endedTechnicalReview'] = technical_review
+        if prebinding:
+            packet['prebindingFailureMode'] = checked['failureMode']
+            packet['endedTechnicalReview'] = technical_review
         m.write(output / 'packet.json', packet)
         con.execute("UPDATE qualifications SET status='recorded',packet=? WHERE id=?", (json.dumps({'path': str(output / 'packet.json'), 'sha256': m.digest(output / 'packet.json')}), identity))
-        p.event(con, identity, 'startup_diagnostic_recorded' if startup else 'preclient_diagnostic_recorded',
+        p.event(con, identity, 'prebinding_diagnostic_recorded' if prebinding else 'startup_diagnostic_recorded' if startup else 'preclient_diagnostic_recorded',
                 'No components tested; original hold and physical count retained')
         return packet
 
 
 def verify_packet(p, plan, packet):
-    require(packet.get('kind') in (KIND, STARTUP_KIND) and packet.get('id') == plan['id'] and packet.get('retainHold') is True and
+    require(packet.get('kind') in (KIND, STARTUP_KIND, PREBINDING_KIND) and packet.get('id') == plan['id'] and packet.get('retainHold') is True and
             packet.get('qualificationOutcome') == 'not_conducted' and packet.get('testingStarted') is False and
             packet.get('actualGameStarts') == 1 and packet.get('globalProviderQualified') is False, 'diagnostic claims changed')
     folder = p.local / 'qualifications' / plan['id']; run = Path(packet['runDirectory'])
     startup = packet['kind'] == STARTUP_KIND
-    checked = (verify_startup_prefix if startup else verify_prefix)(plan, folder, run / 'state.json')
+    prebinding = packet['kind'] == PREBINDING_KIND
+    checked = (verify_startup_prefix(plan, folder, run / 'state.json') if startup else
+               verify_prefix(plan, folder, run / 'state.json', prebinding=prebinding))
     if checked.get('failureMode') == 'native-failed-before-client':
         require(packet.get('startupFailureMode') == checked['failureMode'], 'startup failure mode changed')
         verify_ended_technical_review(plan, folder, run / 'state.json', packet.get('endedTechnicalReview'), checked)
+    if prebinding:
+        require(packet.get('prebindingFailureMode') == checked['failureMode'], 'prebinding failure mode changed')
+        require(packet.get('executionOutcome') == 'failed' and packet.get('subjectModAccepted') is False and
+                packet.get('physicsQualified') is False and packet.get('clientRunIdentityAvailable') is False and
+                type(packet.get('actualGameStarts')) is int,
+                'prebinding diagnostic cannot claim subject/provider qualification or a fabricated client binding')
+        verify_ended_technical_review(plan, folder, run / 'state.json', packet.get('endedTechnicalReview'), checked, prebinding=True)
     require(packet.get('componentCoverage') == [{'name': n, 'result': 'not_run'} for n in checked['names']] and
             packet.get('ownerFinishCommandId') == checked['finish'], 'diagnostic coverage changed')
     originals = packet.get('retainedOriginalPins', [])
     require([(x['originalPath'], x['sha256']) for x in originals] == [(x['path'], x['sha256']) for x in plan['pins']], 'retained original inventory differs')
     for row in originals:
         file = Path(row['retainedPath'])
-        require(file.is_relative_to(folder / ('startup-diagnostic' if startup else 'preclient-diagnostic') / 'original-inputs') and
+        require(file.is_relative_to(folder / ('prebinding-diagnostic' if prebinding else 'startup-diagnostic' if startup else 'preclient-diagnostic') / 'original-inputs') and
                 api().digest(file) == row['sha256'], 'retained original bytes differ')
     verify_archive(packet)
