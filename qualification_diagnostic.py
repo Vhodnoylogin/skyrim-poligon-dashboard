@@ -5,6 +5,7 @@ import importlib.util
 import json
 import ntpath
 from pathlib import Path
+import re
 import stat
 
 from qualification import inventory
@@ -36,9 +37,32 @@ def _sources(plan, review, plan_path):
             or receipt.get('planSha256') != _hash(plan_path)):
         raise ValueError('Original source export must bind the exact frozen plan')
     entrypoints = [p for p in plan['pins'] if Path(p['path']).name == 'polygon.py']
-    if len(entrypoints) != 1:
-        raise ValueError('Unique original Dashboard entrypoint required')
-    root = Path(entrypoints[0]['path']).parent
+    execution_evidence = None
+    if len(entrypoints) == 1:
+        root = Path(entrypoints[0]['path']).parent
+    else:
+        # A plan can retain earlier Dashboard exports as accounting evidence.
+        # Select the actually executed root only from the exact original late
+        # companion-gate traceback, never merely from a reviewer's path choice.
+        root = _absolute(receipt.get('executedDashboardRoot', ''))
+        execution_evidence = _pin(receipt.get('executionEvidence'), plan_path.parent / 'subject-companion' / 'dispatch.json')
+        dispatch = m.read(execution_evidence)
+        worker = m.read(plan_path.parent / 'worker.json').get('identity')
+        message = 'Qualification pin changed: ' + plan['configuration']['mo2_ini']
+        details = dispatch.get('errorDetails', {})
+        frames = re.findall(r'File "([^"]+)", line [0-9]+, in ([^\r\n]+)', details.get('traceback', ''))
+        expected_frames = [(str(root / 'qualification_companion.py'), 'companion'),
+                           (str(root / 'qualification.py'), 'qualification_verify')]
+        if (len(entrypoints) < 2 or not any(Path(pin['path']).parent == root for pin in entrypoints)
+                or set(dispatch) != {'schemaVersion', 'orderId', 'qualificationId', 'worker', 'error', 'errorDetails'}
+                or dispatch.get('schemaVersion') != 1 or dispatch.get('qualificationId') != plan['id']
+                or dispatch.get('orderId') != 'qualification-' + plan['id'] or dispatch.get('worker') != worker
+                or dispatch.get('error') != 'ValueError: ' + message
+                or details.get('operation') != 'qualification-companion'
+                or [(ntpath.normcase(ntpath.normpath(path)), function) for path, function in frames]
+                   != [(ntpath.normcase(ntpath.normpath(path)), function) for path, function in expected_frames]
+                or not details.get('traceback', '').rstrip().endswith('ValueError: ' + message)):
+            raise ValueError('Exact executed late companion-gate source evidence required')
     expected = {p['path']: p['sha256'] for p in plan['pins']
                 if Path(p['path']).parent == root and Path(p['path']).suffix == '.py'}
     rows = receipt.get('files', [])
@@ -47,6 +71,8 @@ def _sources(plan, review, plan_path):
             or len({r.get('exportPath') for r in rows}) != len(rows)):
         raise ValueError('Complete original source export inventory required')
     retained = [receipt_path]
+    if execution_evidence is not None:
+        retained.append(execution_evidence)
     for row in rows:
         exported = _pin({'path': row['exportPath'], 'sha256': row['sha256']})
         retained.append(exported)
@@ -220,6 +246,22 @@ def _checked(p, identity, review_path, con):
             raise ValueError('Identity evidence must be in pinned accounting evidence')
         m.required_string(row, 'locator')
     identities.extend(unique.values())
+    if review.get('exactSingleStartReviewed') is not None:
+        if (review['exactSingleStartReviewed'] is not True or len(unique) != 1
+                or state.get('game') != next(iter(unique.values()))
+                or p.native_game_starts(state) != 1
+                or state.get('result') != 'failed' or result.get('result') != 'failed'
+                or exit_record != {'returncode': 1}):
+            raise ValueError('Exact single failed native start review differs')
+    additional = review.get('additionalEvidencePins', [])
+    if (type(additional) is not list or len(additional) > 100000
+            or len({json.dumps(pin, sort_keys=True) for pin in additional}) != len(additional)):
+        raise ValueError('Bounded unique supplemental raw evidence required')
+    paths.extend(_pin(pin) for pin in additional)
+    extra_identities = review.get('additionalDeadIdentities', [])
+    if type(extra_identities) is not list or len(extra_identities) > 16:
+        raise ValueError('Bounded additional exact process identities required')
+    identities.extend(_identity(ident) for ident in extra_identities)
     paths.extend([plan_path, review_path, child, worker_path, state_path, result_path,
                   *evidence, *(Path(x['path']) for x in archived)])
     _pin(review['observer'])
@@ -229,6 +271,9 @@ def _checked(p, identity, review_path, con):
                      and x.name not in ('packet.json', 'held-diagnostic.json'))
     paths.extend(Path(x['path']) for x in m.raw_evidence_pins(state_path.parent))
     files = [{'path': str(x), 'sha256': _hash(x)} for x in sorted(set(paths))]
+    original_pins = {str(_absolute(pin['path'])): pin['sha256'] for pin in plan['pins']}
+    if any(pin['path'] in original_pins and pin['sha256'] != original_pins[pin['path']] for pin in files):
+        raise ValueError('Original diagnostic input changed during review')
     return plan, review, worker, identities, state_path, archived, list(unique.values()), files, directories
 
 
@@ -272,6 +317,13 @@ def record(p, identity, review_path):
                   'reason': review['summary']}
         packet['testResult'] = p.test_projection(plan['orderData'], packet)
         packet['testingStarted'] = packet['testResult']['testingStarted']
+        if review.get('exactSingleStartReviewed') is True:
+            packet.update(actualGameStarts=1,
+                cumulativeActualGameStartsAfter=(None if plan['cumulativeActualGameStartsBefore'] is None
+                                                else plan['cumulativeActualGameStartsBefore'] + 1),
+                accountingBasis='reviewed_exact_single_native_start')
+        if review.get('additionalEvidencePins'):
+            packet['supplementalEvidenceRole'] = 'raw_only_not_official_companion_or_qualification_coverage'
         # An interrupted write is retained for review, never overwritten/adopted.
         target = p.local / 'qualifications' / identity / 'held-diagnostic.json'
         snapshots = target.parent / 'diagnostic-implementation'
@@ -294,10 +346,13 @@ def record(p, identity, review_path):
         protected.add(str(_absolute(str(accounting))))
         live_roots = [Path(plan['configuration'][key]).resolve()
                       for key in ('game', 'mods', 'profiles', 'overwrite') if plan['configuration'].get(key)]
-        original_paths = {pin['path'] for pin in plan['pins']}
-        mutable_inputs = [pin for pin in files if pin['path'] in original_paths
+        live_settings = ({Path(plan['configuration']['mo2_ini']).resolve()}
+                         if plan['configuration'].get('mo2_ini') else set())
+        original_pins = {pin['path']: pin for pin in plan['pins']}
+        mutable_inputs = [original_pins[pin['path']] for pin in files if pin['path'] in original_pins
                           and pin['path'] not in protected
                           and (Path(pin['path']) == p.local / 'config.json'
+                               or Path(pin['path']).resolve() in live_settings
                                or any(Path(pin['path']).is_relative_to(root) for root in live_roots))]
         mutable_paths = {pin['path'] for pin in mutable_inputs}
         files[:] = [pin for pin in files if pin['path'] not in mutable_paths]

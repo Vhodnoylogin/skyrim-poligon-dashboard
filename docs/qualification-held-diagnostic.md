@@ -83,3 +83,47 @@ clearance contract and a deliberate review/settlement of current shared state.
 The historical unknown count remains unknown after clearance. Old jobs and cycles
 never restart automatically. Offline acquisition, extraction and builds are
 separate from live installation and game qualification.
+
+## Ended late companion admission failure
+
+The same collection-only command supports a failed restored native session whose
+official companion dispatch stopped at the late `ModOrganizer.ini` pin check.
+The official report remains missing; a separately retained manual attachment is
+raw evidence, never an adopted official client or passed qualification.
+
+A frozen plan may include earlier Dashboard roots as historical accounting pins.
+For that case the original source-export receipt additionally declares
+`executedDashboardRoot` and `executionEvidence:{path,sha256}`. The evidence must
+be the original qualification's `subject-companion/dispatch.json`: exact order,
+qualification and worker, the original MO2-INI pin error, and its two traceback
+frames in `qualification_companion.py:companion` and
+`qualification.py:qualification_verify` inside the selected pinned root.
+The selected root's full original Python export is mandatory. Every other
+historical source/input pin remains checked; a reviewer path alone cannot select
+or waive a source root.
+The exact original configured `mo2_ini` is checked at recording and frozen with
+its origin mapping, like other operational inputs. Later authorized profile
+selection cannot invalidate the historical packet through that mutable file.
+
+Optional `exactSingleStartReviewed:true` preserves a proven exact native count
+of one, rather than replacing it with an unknown count. It requires failed state
+and result, exact child exit1, one captured native start with no restart and the
+same single independently reviewed observed game identity. A null cumulative
+baseline remains null. `qualificationPassed=false`, original failed outcome,
+original coverage and the genuine hold remain unchanged.
+
+`additionalEvidencePins` may retain immutable raw manual-report/events and their
+referenced evidence without supplying official companion results or coverage.
+`additionalDeadIdentities` may add up to16 exact client/sequencer identities to
+the fresh process-death check. No process is terminated by collection.
+
+The operator sequence is `qualification-record-diagnostic ID REVIEW.json`, verify
+the resulting packet and restoration, then, only with separately verified current
+owner authority and settled installation/native state, use the existing
+`pipeline-clear qualification-ID CLEARANCE.json`. The clearance declares the
+exact `holdId`, `installationSettled:true` and independently verified
+`ownerAuthorization` with thread/message, exact quote and pinned evidence.
+Failed diagnostics cannot use `qualification-release`. Clearance starts no game,
+reopens no cycle and refreshes no budget. A subsequent manual launch needs its
+own fresh bounded registration/owner evidence and a new ID; old channel, claim,
+commands and qualification remain historical.
