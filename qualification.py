@@ -468,6 +468,7 @@ class Qualifications:
             if packet.get('kind') == 'qualification-held-diagnostic':
                 from qualification_diagnostic import verify_archive
                 verify_archive(packet)
+                return packet  # Failed diagnostic has no official companion result to reconstruct.
             if packet.get('collectionRepair'):
                 from qualification_collection_repair import verify_packet_archive
                 verify_packet_archive(packet)

@@ -90,6 +90,11 @@ The same collection-only command supports a failed restored native session whose
 official companion dispatch stopped at the late `ModOrganizer.ini` pin check.
 The official report remains missing; a separately retained manual attachment is
 raw evidence, never an adopted official client or passed qualification.
+Repeated collection verifies the retained packet digest, every evidence/code
+snapshot digest and exact profile archive membership, then returns that failed
+diagnostic. It does not reconstruct an official companion result, even when the
+historical plan declared a companion. Ordinary qualification packets retain their
+strict official companion verification.
 
 A frozen plan may include earlier Dashboard roots as historical accounting pins.
 For that case the original source-export receipt additionally declares
