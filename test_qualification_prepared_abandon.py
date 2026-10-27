@@ -97,5 +97,21 @@ class PreparedAbandonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'released work'): self.abandon()
         self.assertEqual(len(self.p.pipeline_status()['holds']), 1)
 
+    def test_complete_real_windows_inventory_includes_exact_idle_sentinel(self):
+        self.rows = [{'pid': 0, 'parent': 0, 'name': '[System Process]'},
+                     {'pid': 4, 'parent': 0, 'name': 'System'}, {'pid': 222, 'parent': 4, 'name': 'python.exe'}]
+        self.assertEqual(self.abandon()['status'], 'abandoned')
+
+    def test_zero_pid_is_only_the_exact_native_windows_idle_sentinel(self):
+        for row in ({'pid': 0, 'parent': 0, 'name': 'SkyrimSE.exe'},
+                    {'pid': 0, 'parent': 0, 'name': 'python.exe'},
+                    {'pid': 0, 'name': '[System Process]'},
+                    {'pid': 0, 'parent': 3, 'name': '[System Process]'},
+                    {'pid': -1, 'parent': 0, 'name': '[System Process]'}):
+            with self.subTest(row=row):
+                self.rows = [row]
+                with self.assertRaisesRegex(ValueError, 'native idle inventory'): self.abandon()
+                self.assertEqual(self.p.qualification_show('candidate-one')['status'], 'prepared')
+
 
 if __name__ == '__main__': unittest.main()

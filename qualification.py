@@ -260,7 +260,8 @@ class Qualifications:
             processes = runner.native.processes()
             if (not isinstance(processes, list) or not processes or
                     any(not isinstance(p, dict) or not isinstance(p.get('name'), str) or not p['name'] or
-                        type(p.get('pid')) is not int or p['pid'] <= 0 for p in processes) or
+                        type(p.get('pid')) is not int or p['pid'] < 0 or
+                        (p['pid'] == 0 and (p['name'] != '[System Process]' or p.get('parent') != 0)) for p in processes) or
                     any(p['name'].lower() in runner.GAME_NAMES for p in processes)):
                 raise ValueError('Fresh complete native idle inventory required')
             if inventory(plan['executor']) != plan['executorPins'] or m.digest(review_path) != review_hash:
