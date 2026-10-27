@@ -128,6 +128,7 @@ def run(p, plan, row, folder, runner, run_native):
     expires = row['expires']; maximum = spec['maximumSeconds']
     _require(expires - time.time() >= maximum + RESTORATION_RESERVE_SECONDS,
              'original outer window cannot fit declared companion plus restoration before native start')
+    p.qualification_verify(p.qualification_show(plan['id']))  # Original pins before native mutations.
     stop = threading.Event(); admission_lock = threading.Lock(); outcome = {}
     client_box = {}
 
@@ -151,7 +152,16 @@ def run(p, plan, row, folder, runner, run_native):
                 _ready(state, worker, expected_config, maximum)
                 _require(expires - time.time() >= maximum + RESTORATION_RESERVE_SECONDS,
                          'declared companion plus restoration no longer fits original outer deadline')
-                p.qualification_verify(p.qualification_show(plan['id']))
+                outcome['ownedMO2Admission'] = p.qualification_verify_owned_mo2(
+                    p.qualification_show(plan['id']), state_path, state, runner)
+                # Re-read through the existing bounded state reader before client spawn.
+                fresh = _matching_live_runs(order, plan['configuration']['runtime'], {}, None, stop, start_end)
+                _require(len(fresh) == 1 and fresh[0][0] == state_path, 'native owner changed during MO2 admission')
+                _ready(fresh[0][1], worker, expected_config, maximum)
+                _require(fresh[0][1].get('game') == state['game'], 'game identity changed during MO2 admission')
+                _require(expires - time.time() >= maximum + RESTORATION_RESERVE_SECONDS,
+                         'MO2 admission consumed the original outer window')
+                save()
                 args = [sys.executable, spec['transport']['path'], '--executor', plan['executor'],
                     '--executor-manifest', str(manifest), '--executor-manifest-sha256', m.digest(manifest),
                     '--plan', spec['plan']['path'], '--plan-sha256', spec['plan']['sha256'],
@@ -169,6 +179,16 @@ def run(p, plan, row, folder, runner, run_native):
                 with (output / 'client.log').open('x', encoding='utf-8') as log:
                     with admission_lock:
                         if stop.is_set(): return
+                        for identity in (worker, state['game'], outcome['ownedMO2Admission']['manager']):
+                            _require(runner.native.identity(identity['pid']) == identity,
+                                     'owned native/manager identity changed before client spawn')
+                        owned_mo2 = outcome['ownedMO2Admission']
+                        _require(m.digest(owned_mo2['path']) == owned_mo2['liveSha256']
+                                 and m.digest(owned_mo2['backup']['path']) == owned_mo2['originalSha256'],
+                                 'owned MO2 settings changed before client spawn')
+                        _require(time.time() < state['deadline'] and
+                                 expires - time.time() >= maximum + RESTORATION_RESERVE_SECONDS,
+                                 'original native/outer deadline expired before client spawn')
                         child = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT,
                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), shell=False)
                         client_box['child'] = child

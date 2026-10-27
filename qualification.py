@@ -54,6 +54,18 @@ class Qualifications:
                 con.execute("SELECT id FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone())
 
     def qualification_verify(self, row, authority=True):
+        return self._qualification_verify(row, authority)
+
+    def qualification_verify_owned_mo2(self, row, state_path, state, runner):
+        from qualification_owned_mo2 import witness
+        plan = json.loads(row['request'])
+        if row.get('status') != 'running' or row.get('id') != plan['id']:
+            raise ValueError('Running native qualification required for owned MO2 verification')
+        owned = witness(plan, state_path, state, runner)
+        self._qualification_verify(row, True, owned_mo2=owned)
+        return owned
+
+    def _qualification_verify(self, row, authority=True, owned_mo2=None):
         m = api()
         plan = json.loads(row['request'])
         if inventory(plan['executor']) != plan['executorPins']:
@@ -63,7 +75,12 @@ class Qualifications:
             verify(self, row, plan)
             return plan
         for pin in plan['pins']:
-            if m.digest(pin['path']) != pin['sha256']:
+            expected = pin['sha256']
+            if owned_mo2 is not None and Path(pin['path']).resolve() == Path(owned_mo2['path']):
+                if expected != owned_mo2['originalSha256']:
+                    raise ValueError('Owned MO2 original pin differs')
+                expected = owned_mo2['liveSha256']
+            if m.digest(pin['path']) != expected:
                 raise ValueError('Qualification pin changed: ' + pin['path'])
         if authority:
             m.owner_evidence(plan, Path(plan['requestPath']))

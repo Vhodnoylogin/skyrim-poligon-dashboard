@@ -46,6 +46,19 @@ data client with `--order-id` and `--attempt-id` equal to
 `qualification-QUALIFICATION_ID`. The client verifies its exact manifest, fresh
 empty channel and exclusive per-run claim before any action.
 
+All original pins are checked before the native start. After common readiness,
+the cold-owned SE route checks the configured MO2 INI against its same-run durable
+backup and original pin. Its current bytes must equal exactly the runner's
+single `selected_profile=@ByteArray(Autotest-RUN)` write (including the runner's
+UTF-8 handling); arbitrary settings changes still refuse. The copied profile,
+original source profile, exact live worker/game/manager identities, manager launch
+intent and fresh Bridge session/ping/session must agree. The Bridge may be busy
+running the owned game. All other pins and current owner authority remain strict.
+The original finite native state is reread and identities/deadlines rechecked
+before the one client spawn. Dispatch retains a token-free `ownedMO2Admission`
+witness with original/backup/expected/current hashes and actual Bridge identity.
+This does not waive a pin, change the original plan or admit an existing client.
+
 The outer qualification wall is explicitly frozen in900..14400seconds. Historical
 900second requests still admit at most600companion seconds. A longer manual
 inspection can declare7200outer/6900companion seconds, for example; the pinned

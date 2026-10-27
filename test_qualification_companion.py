@@ -97,8 +97,16 @@ class DispatchTests(unittest.TestCase):
         self.plan = {'id': 'one', 'executor': str(self.root / 'executor'), 'executorPins': [], 'configuration': self.config,
             'companion': {'maximumSeconds': 600, 'plan': {'path': str(self.component_plan), 'sha256': m.digest(self.component_plan)},
                 'sequencer': {'path': str(self.root / 'sequencer.py'), 'sha256': 'a' * 64}, 'transport': {'path': str(self.root / 'transport.py'), 'sha256': 'b' * 64}}}
-        self.p = SimpleNamespace(qualification_show=lambda _: {'status': 'running'}, qualification_verify=Mock(return_value=self.plan))
-        self.runner = SimpleNamespace(native=SimpleNamespace(identity=lambda _: self.worker))
+        self.manager = {'pid': 4243, 'birth': 12346, 'path': str(self.root / 'ModOrganizer.exe')}
+        owned_ini, backup = self.root / 'owned.ini', self.root / 'original.ini'
+        owned_ini.write_text('owned selection'); backup.write_text('original selection')
+        self.owned_witness = {'scope': 'offline-owned-MO2-witness', 'manager': self.manager,
+                              'path': str(owned_ini), 'liveSha256': m.digest(owned_ini),
+                              'backup': {'path': str(backup)}, 'originalSha256': m.digest(backup)}
+        self.p = SimpleNamespace(qualification_show=lambda _: {'status': 'running'}, qualification_verify=Mock(return_value=self.plan),
+                                 qualification_verify_owned_mo2=Mock(return_value=self.owned_witness))
+        identities = {row['pid']: row for row in (self.worker, self.game, self.manager)}
+        self.runner = SimpleNamespace(native=SimpleNamespace(identity=lambda pid: identities.get(pid)))
         config_module = ModuleType('skyrim_autotest.config'); config_module.load = lambda path: m.read(path)
         package = ModuleType('skyrim_autotest'); package.config = config_module
         self.modules = patch.dict(sys.modules, {'skyrim_autotest': package, 'skyrim_autotest.config': config_module}); self.modules.start(); self.addCleanup(self.modules.stop)
@@ -137,12 +145,41 @@ class DispatchTests(unittest.TestCase):
         dispatch = m.read(self.folder / 'subject-companion/dispatch.json')
         self.assertEqual(dispatch['client']['identity'], identity); self.assertEqual(dispatch['client']['exit']['exitCode'], 0)
         self.assertFalse(dispatch['client']['terminatedOwnedClient'])
+        self.p.qualification_verify.assert_called_once()
+        self.p.qualification_verify_owned_mo2.assert_called_once()
+        self.assertEqual(dispatch['ownedMO2Admission'], self.owned_witness)
 
     def test_insufficient_original_outer_budget_refuses_before_native_or_client(self):
         with patch.object(route.subprocess, 'Popen') as popen:
             with self.assertRaisesRegex(ValueError, 'before native start'):
                 route.run(self.p, self.plan, {'expires': time.time() + 650}, self.folder, self.runner, self.native)
         self.assertEqual(self.native_calls, 0); popen.assert_not_called()
+
+    def test_post_admission_game_identity_loss_refuses_the_single_client_spawn(self):
+        original = self.runner.native.identity
+        def admitted(*args):
+            def changed(pid):
+                if pid == self.game['pid']:
+                    self.spawned.set()  # Release the synthetic native wait; no process was started.
+                    return None
+                return original(pid)
+            self.runner.native.identity = changed
+            return self.owned_witness
+        self.p.qualification_verify_owned_mo2.side_effect = admitted
+        with patch.object(route.subprocess, 'Popen') as popen:
+            self.assertEqual(route.run(self.p, self.plan, {'expires': time.time() + 900},
+                                       self.folder, self.runner, self.native), 0)
+        popen.assert_not_called()
+        dispatch = m.read(self.folder / 'subject-companion/dispatch.json')
+        self.assertIn('identity changed before client spawn', dispatch['error'])
+
+    def test_changed_original_pre_native_pin_refuses_before_any_native_start(self):
+        self.p.qualification_verify.side_effect = ValueError('changed original pre-native pin')
+        with patch.object(route.subprocess, 'Popen') as popen:
+            with self.assertRaisesRegex(ValueError, 'changed original pre-native pin'):
+                route.run(self.p, self.plan, {'expires': time.time() + 900}, self.folder, self.runner, self.native)
+        self.assertEqual(self.native_calls, 0)
+        popen.assert_not_called()
 
     def test_deadline_extension_and_wrong_worker_refuse(self):
         state = self.state(); state['deadline'] += 30
