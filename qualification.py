@@ -158,7 +158,7 @@ class Qualifications:
                 reference = registered.get(prior.get('id'))
                 if (prior.get('schemaVersion') != 1 or prior.get('kind') not in
                         ('qualification-held-diagnostic', 'tool-qualification-result',
-                         'qualification-pre-native-result') or
+                         'qualification-pre-native-result', 'qualification-preclient-diagnostic') or
                         'cumulativeActualGameStartsAfter' not in prior or
                         prior['cumulativeActualGameStartsAfter'] is not None or
                         not reference or Path(reference['path']).resolve() != file or
@@ -373,6 +373,10 @@ class Qualifications:
             for pin in packet['files']:
                 if m.digest(pin['path']) != pin['sha256']:
                     raise ValueError('Qualification evidence changed')
+            if packet.get('kind') == 'qualification-preclient-diagnostic':
+                from qualification_preclient import verify_packet
+                verify_packet(self, plan, packet)
+                return packet
             if packet.get('kind') == 'qualification-held-diagnostic':
                 from qualification_diagnostic import verify_archive
                 verify_archive(packet)
@@ -473,6 +477,8 @@ class Qualifications:
     def qualification_successful_result(plan, packet):
         """Allow declared tool observations, without converting them into passed assertions."""
         m = api()
+        if packet.get('kind') == 'qualification-preclient-diagnostic':
+            return False
         if 'companion' in plan:
             from qualification_companion import successful
             if not successful(plan, packet):
