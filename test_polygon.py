@@ -188,7 +188,7 @@ class Tests(unittest.TestCase):
         self.p.report_ready(path)
         entry = mod.read(self.p.pending()[0]["report"])["orders"][0]["testResult"]
         self.assertEqual(entry["outcome"], "tested_successfully")
-        self.assertEqual(entry["execution"]["terminationCause"], "normal_close")
+        self.assertEqual(entry["execution"]["terminationCause"], "unknown")
 
     def test_passed_process_without_data_is_incomplete(self):
         self.final_fixture([{"name": n, "result": "passed"} for n in ("subject-check", "later-check")], outcome="passed")

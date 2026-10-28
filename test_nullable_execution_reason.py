@@ -12,7 +12,7 @@ class NullableExecutionReasonTests(unittest.TestCase):
             polygon.write(run/'state.json', state)
             before = (run/'state.json').read_bytes()
             summary = polygon.Polygon.execution_summary({'id': 'order'}, run, 'passed', None)
-            self.assertEqual(summary['terminationCause'], 'normal_close')
+            self.assertEqual(summary['terminationCause'], 'unknown')
             self.assertEqual(summary['reason'], '')
             self.assertEqual((run/'state.json').read_bytes(), before)
 

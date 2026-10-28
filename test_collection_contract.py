@@ -70,7 +70,7 @@ class CollectionContract(unittest.TestCase):
             with self.subTest(fields=fields):
                 fixture, packet, entry = self.report({'state': fields, 'result': fields})
                 self.assertEqual(entry['testResult']['outcome'], 'tested_successfully')
-                self.assertEqual(entry['testResult']['execution']['terminationCause'], 'normal_close')
+                self.assertEqual(entry['testResult']['execution']['terminationCause'], 'unknown')
                 self.assertFalse(mod.read(fixture.p.evidence_dir('final-fixture') / 'self-checks.json')['findings'])
                 order, verified = fixture.p.verify_packet(fixture.p.get('final-fixture'))
                 legacy_failed = copy.deepcopy(verified)

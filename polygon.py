@@ -814,20 +814,99 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         return findings
 
     @staticmethod
+    def game_exit_evidence(run, state, pinned_paths=None):
+        """Project retained exact-owner telemetry; no inferred zero or crash cause."""
+        evidence = {"observations": [], "exitCodes": [], "currentGameExitCodes": [], "normalQuitRequested": False,
+                    "forcedStopObserved": False, "invalidExitObservation": False}
+        if not run:
+            return evidence
+
+        def identity(value):
+            return (isinstance(value, dict) and set(value) == {"pid", "birth", "path"}
+                    and type(value["pid"]) is int and value["pid"] > 0
+                    and type(value["birth"]) is int and value["birth"] > 0
+                    and isinstance(value["path"], str) and Path(value["path"]).is_absolute())
+
+        owners = []
+        for game in [state.get("game")] + [row.get("identity") for row in state.get("owned", [])
+                                           if isinstance(row, dict) and row.get("role") == "game"]:
+            if identity(game) and game not in owners:
+                owners.append(game)
+        codes, current_codes = set(), set()
+        for name in ("state.json", "result.json"):
+            path = Path(run) / name
+            if not path.is_file() or (pinned_paths is not None and path.resolve() not in pinned_paths):
+                continue
+            raw = state if name == "state.json" else read(path)
+            evidence["forcedStopObserved"] |= raw.get("forcedGameStop") is True
+            quit_request = raw.get("gracefulGameExit")
+            if (isinstance(quit_request, dict) and quit_request.get("game") == state.get("game")
+                    and identity(quit_request.get("game")) and quit_request.get("command") == "qqq"
+                    and quit_request.get("requestAttempted") is True):
+                evidence["normalQuitRequested"] = True
+            rows = raw.get("gameProcessObservations", [])
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict) or row.get("expectedIdentity") not in owners:
+                    continue
+                evidence["observations"].append({"source": str(path), "observation": row})
+                if row.get("status") != "exited":
+                    continue
+                code = row.get("exitCode")
+                valid = (row.get("identityVerified") is True and row.get("identity") == row["expectedIdentity"]
+                         and row.get("exitCodeAvailable") is True and type(code) is int and 0 <= code < 2**32
+                         and row.get("exitCodeHex") == f"0x{code:08X}")
+                if valid:
+                    codes.add(code)
+                    if row["identity"] == state.get("game"):
+                        current_codes.add(code)
+                else:
+                    evidence["invalidExitObservation"] = True
+        path = Path(run) / "steps.jsonl"
+        if path.is_file() and (pinned_paths is None or path.resolve() in pinned_paths):
+            for line in path.read_text(encoding="utf-8-sig").splitlines():
+                row = json.loads(line)
+                if row.get("kind") == "forced-stop" and row.get("role") == "game":
+                    evidence["forcedStopObserved"] = True
+                args = row.get("args", {})
+                if (len(owners) == 1 and state.get("game") in owners
+                        and row.get("kind") == "tool" and row.get("tool") == "console"
+                        and isinstance(args, dict) and args.get("action", "exec") == "exec"
+                        and isinstance(args.get("command"), str) and args["command"].strip().casefold() == "qqq"
+                        and isinstance(row.get("result"), dict)):
+                    evidence["normalQuitRequested"] = True
+                if (row.get("kind") == "graceful-game-exit-request" and row.get("game") == state.get("game")
+                        and identity(row.get("game")) and row.get("command") == "qqq"
+                        and row.get("requestAttempted") is True):
+                    evidence["normalQuitRequested"] = True
+        evidence["exitCodes"] = sorted(codes)
+        evidence["currentGameExitCodes"] = sorted(current_codes)
+        return evidence
+
+    @staticmethod
     def execution_summary(order, run, outcome, reason, pinned_paths=None):
         """Technical evidence projection; never a test-order result or mod diagnosis."""
         reason = "" if reason is None else reason
-        state = read(Path(run) / "state.json") if run and (Path(run) / "state.json").exists() else {}
+        state_path = Path(run) / "state.json" if run else None
+        state = read(state_path) if (state_path and state_path.is_file()
+                    and (pinned_paths is None or state_path.resolve() in pinned_paths)) else {}
         collection = Polygon.collection_findings(run, pinned_paths)
+        game_exit = Polygon.game_exit_evidence(run, state, pinned_paths)
         if not run:
             cause = "pre_session_refusal"
         elif collection:
             cause = "evidence_collection_failure"
+        elif any(code != 0 for code in game_exit["exitCodes"]):
+            cause = "unexpected_process_exit"  # Nonzero is observed; its underlying cause is not.
+        elif game_exit["forcedStopObserved"]:
+            cause = "operational_interruption"
         elif reason.startswith("Assertion failed:"):
             cause = "assertion_stop"
         elif "exited unexpectedly" in reason:
             cause = "unexpected_process_exit"  # Evidence cannot distinguish CTD from external kill.
-        elif outcome == "passed" and state.get("done") is True and state.get("restored") is True:
+        elif (outcome == "passed" and state.get("done") is True and state.get("restored") is True
+              and game_exit["exitCodes"] == [0] and game_exit["currentGameExitCodes"] == [0]
+              and game_exit["normalQuitRequested"]
+              and not game_exit["invalidExitObservation"]):
             cause = "normal_close"
         elif any(text in reason for text in ("foreground", "connection lost", "stalled", "guardian", "abandoned")):
             cause = "operational_interruption"
@@ -838,6 +917,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                 "terminationCause": cause, "rawOutcome": outcome, "reason": reason,
                 "restored": state.get("restored"), "restoreErrors": state.get("restoreErrors"),
                 "collectionFindings": collection,
+                "gameExitEvidence": game_exit,
                 "evidence": str(Path(run) / "steps.jsonl") if run else None}
 
     @staticmethod
