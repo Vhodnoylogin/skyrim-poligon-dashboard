@@ -833,6 +833,17 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                 return False
             if value.get("command") == "qqq":
                 return True
+            if value.get("command") == "window-close":
+                receipt = value.get("windowClose")
+                if (not isinstance(receipt, dict) or receipt.get("requested") is not True
+                        or receipt.get("systemCommand") is not False):
+                    return False
+                windows = receipt.get("windows")
+                return (isinstance(windows, list) and 1 <= len(windows) <= 256
+                        and any(isinstance(row, dict) and type(row.get("hwnd")) is int and row["hwnd"] > 0
+                                and type(row.get("message")) is int and row["message"] == 16
+                                and row.get("accepted") is True
+                                and type(row.get("error")) is int and row["error"] == 0 for row in windows))
             desktop = value.get("desktopQuit")
             return (value.get("command") == "menu-main-quit" and isinstance(desktop, dict)
                     and desktop.get("game") == value["game"] and desktop.get("requestAttempted") is True)

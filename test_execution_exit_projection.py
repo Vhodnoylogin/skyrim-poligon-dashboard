@@ -106,6 +106,57 @@ class ExecutionExitProjectionTests(unittest.TestCase):
             exitCode=None, exitCodeHex=None, exitCodeAvailable=False)]
         self.assertEqual(self.project()['terminationCause'], 'unknown')
 
+    def window_quit(self, windows=None):
+        return {'game': self.game, 'command': 'window-close', 'requestAttempted': True,
+                'windowClose': {'requested': True, 'systemCommand': False, 'windows': windows if windows is not None else [
+                    {'hwnd': 4567, 'message': 16, 'accepted': True, 'error': 0}]}}
+
+    def test_window_close_requires_typed_accepted_request_and_actual_zero(self):
+        self.events = []
+        self.state['gameProcessObservations'] = [self.observation(0)]
+        for source in (self.state, self.result):
+            source['gracefulGameExit'] = self.window_quit()
+            self.assertEqual(self.project()['terminationCause'], 'normal_close')
+            source.pop('gracefulGameExit')
+        accepted = self.window_quit()['windowClose']['windows'][0]
+        self.state['gracefulGameExit'] = self.window_quit([dict(accepted, accepted=False, error=1400), accepted])
+        self.assertEqual(self.project()['terminationCause'], 'normal_close')
+
+    def test_empty_rejected_malformed_or_wrong_message_window_close_is_not_quit_proof(self):
+        self.events = []
+        self.state['gameProcessObservations'] = [self.observation(0)]
+        row = self.window_quit()['windowClose']['windows'][0]
+        cases = [[], [dict(row, accepted=False)], [dict(row, accepted=1)], [dict(row, message=0x112)],
+                 [dict(row, message=True)], [dict(row, error=5)], [dict(row, error=False)],
+                 [dict(row, hwnd=0)], [dict(row, hwnd=True)], ['not a window receipt']]
+        for windows in cases:
+            with self.subTest(windows=windows):
+                self.state['gracefulGameExit'] = self.window_quit(windows)
+                self.assertEqual(self.project()['terminationCause'], 'unknown')
+        for change in ('identity', 'attempt', 'receipt', 'requested', 'system-command', 'missing-system-command'):
+            with self.subTest(change=change):
+                record = self.window_quit()
+                if change == 'identity': record['game'] = dict(self.game, birth=999)
+                if change == 'attempt': record['requestAttempted'] = False
+                if change == 'receipt': record.pop('windowClose')
+                if change == 'requested': record['windowClose']['requested'] = False
+                if change == 'system-command': record['windowClose']['systemCommand'] = True
+                if change == 'missing-system-command': record['windowClose'].pop('systemCommand')
+                self.state['gracefulGameExit'] = record
+                self.assertEqual(self.project()['terminationCause'], 'unknown')
+
+    def test_window_close_cannot_hide_nonzero_forced_or_missing_exit(self):
+        self.events = []
+        self.state['gracefulGameExit'] = self.window_quit()
+        self.state['gameProcessObservations'] = [self.observation(0xC0000005)]
+        self.assertEqual(self.project()['terminationCause'], 'unexpected_process_exit')
+        self.state['gameProcessObservations'] = [self.observation(0)]
+        self.state['forcedGameStop'] = True
+        self.assertEqual(self.project()['terminationCause'], 'operational_interruption')
+        self.state.pop('forcedGameStop')
+        self.state['gameProcessObservations'] = []
+        self.assertEqual(self.project()['terminationCause'], 'unknown')
+
     def test_absent_unavailable_malformed_or_foreign_observer_never_invents_zero(self):
         missing = self.observation(0)
         cases = [[], [dict(missing, status='unavailable', exitCode=None, exitCodeHex=None, exitCodeAvailable=False)],
