@@ -827,6 +827,16 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                     and type(value["birth"]) is int and value["birth"] > 0
                     and isinstance(value["path"], str) and Path(value["path"]).is_absolute())
 
+        def quit_attempt(value):
+            if (not isinstance(value, dict) or value.get("game") != state.get("game")
+                    or not identity(value.get("game")) or value.get("requestAttempted") is not True):
+                return False
+            if value.get("command") == "qqq":
+                return True
+            desktop = value.get("desktopQuit")
+            return (value.get("command") == "menu-main-quit" and isinstance(desktop, dict)
+                    and desktop.get("game") == value["game"] and desktop.get("requestAttempted") is True)
+
         owners = []
         for game in [state.get("game")] + [row.get("identity") for row in state.get("owned", [])
                                            if isinstance(row, dict) and row.get("role") == "game"]:
@@ -840,9 +850,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             raw = state if name == "state.json" else read(path)
             evidence["forcedStopObserved"] |= raw.get("forcedGameStop") is True
             quit_request = raw.get("gracefulGameExit")
-            if (isinstance(quit_request, dict) and quit_request.get("game") == state.get("game")
-                    and identity(quit_request.get("game")) and quit_request.get("command") == "qqq"
-                    and quit_request.get("requestAttempted") is True):
+            if quit_attempt(quit_request):
                 evidence["normalQuitRequested"] = True
             rows = raw.get("gameProcessObservations", [])
             for row in rows if isinstance(rows, list) else []:
@@ -874,9 +882,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                         and isinstance(args.get("command"), str) and args["command"].strip().casefold() == "qqq"
                         and isinstance(row.get("result"), dict)):
                     evidence["normalQuitRequested"] = True
-                if (row.get("kind") == "graceful-game-exit-request" and row.get("game") == state.get("game")
-                        and identity(row.get("game")) and row.get("command") == "qqq"
-                        and row.get("requestAttempted") is True):
+                if row.get("kind") == "graceful-game-exit-request" and quit_attempt(row):
                     evidence["normalQuitRequested"] = True
         evidence["exitCodes"] = sorted(codes)
         evidence["currentGameExitCodes"] = sorted(current_codes)

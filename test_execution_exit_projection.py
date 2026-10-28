@@ -60,6 +60,52 @@ class ExecutionExitProjectionTests(unittest.TestCase):
         self.events = [dict(self.state['gracefulGameExit'], kind='graceful-game-exit-request')]
         self.assertEqual(self.project()['terminationCause'], 'unknown')
 
+    def menu_quit(self):
+        return {'game': self.game, 'command': 'menu-main-quit', 'requestAttempted': True,
+                'desktopQuit': {'game': self.game, 'requestAttempted': True}}
+
+    def test_observed_zero_and_exact_desktop_quit_attempt_in_state_or_result_prove_normal_close(self):
+        self.state['gameProcessObservations'] = [self.observation(0)]
+        self.events = []
+        for source in (self.state, self.result):
+            source['gracefulGameExit'] = self.menu_quit()
+            self.assertEqual(self.project()['terminationCause'], 'normal_close')
+            source.pop('gracefulGameExit')
+
+    def test_return_to_main_selection_or_foreign_desktop_identity_never_prove_quit(self):
+        self.state['gameProcessObservations'] = [self.observation(0)]
+        self.events = [{'kind': 'tool', 'tool': 'menu', 'args': {'action': 'startup', 'startupOperation': 'confirm-quit'},
+                        'result': {'queued': True}}]
+        requests = [
+            {'game': self.game, 'command': 'menu-main-quit', 'requestAttempted': False,
+             'returnToMainMenu': {'requestAttempted': True}},
+            {'game': self.game, 'command': 'menu-main-quit', 'requestAttempted': True,
+             'selection': {'requestAttempted': True}},
+            dict(self.menu_quit(), requestAttempted=False),
+            dict(self.menu_quit(), desktopQuit={'game': self.game, 'requestAttempted': False}),
+            dict(self.menu_quit(), desktopQuit={'requestAttempted': True}),
+            dict(self.menu_quit(), game=dict(self.game, birth=999)),
+            dict(self.menu_quit(), desktopQuit={'game': dict(self.game, birth=999), 'requestAttempted': True}),
+            dict(self.menu_quit(), desktopQuit={'game': self.game, 'requestAttempted': 1}),
+        ]
+        for request in requests:
+            with self.subTest(request=request):
+                self.state['gracefulGameExit'] = request
+                self.assertEqual(self.project()['terminationCause'], 'unknown')
+
+    def test_menu_quit_request_does_not_override_abnormal_forced_or_unavailable_exit(self):
+        self.events = []
+        self.state['gracefulGameExit'] = self.menu_quit()
+        self.state['gameProcessObservations'] = [self.observation(0xC0000005)]
+        self.assertEqual(self.project()['terminationCause'], 'unexpected_process_exit')
+        self.state['gameProcessObservations'] = [self.observation(0)]
+        self.state['forcedGameStop'] = True
+        self.assertEqual(self.project()['terminationCause'], 'operational_interruption')
+        self.state.pop('forcedGameStop')
+        self.state['gameProcessObservations'] = [dict(self.observation(0), status='unavailable',
+            exitCode=None, exitCodeHex=None, exitCodeAvailable=False)]
+        self.assertEqual(self.project()['terminationCause'], 'unknown')
+
     def test_absent_unavailable_malformed_or_foreign_observer_never_invents_zero(self):
         missing = self.observation(0)
         cases = [[], [dict(missing, status='unavailable', exitCode=None, exitCodeHex=None, exitCodeAvailable=False)],
