@@ -274,6 +274,48 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Dedicated schema1'):
             self.register()
 
+    def owned_load_step(self):
+        return {'name': 'tool-check', 'tool': 'platform',
+                'args': {'operation': 'object.perform', 'request': {
+                    'domain': 'save-state', 'action': 'load-owned-disposable-once',
+                    'saveLabel': 'owned-six', 'maximumLoads': 1, 'processRestart': False}},
+                'assert': [{'path': 'ready', 'equals': True}]}
+
+    def test_same_process_owned_load_preserves_original_pinned_request(self):
+        self.scenario['steps'] = [self.owned_load_step()]
+        original = json.loads(json.dumps(self.scenario))
+        m.write(self.root / 'scenario.json', self.scenario)
+        self.assertEqual(self.register()['status'], 'prepared')
+        plan = json.loads(self.p.qualification_show('candidate-one')['request'])
+        self.assertEqual(plan['scenario'], original)
+        self.assertEqual(m.read(self.root / 'scenario.json'), original)
+        self.assertIs(plan['scenario']['steps'][0]['args']['request']['processRestart'], False)
+
+    def test_owned_load_exception_does_not_admit_other_restart_requests(self):
+        variants = [('processRestart', value) for value in (True, 0, None, 'false')]
+        variants += [('domain', 'other'), ('action', 'other'),
+                     ('operation', 'world.read'), ('tool', 'inspect'),
+                     ('tool', 'game'), ('tool', 'console'),
+                     ('nested-request', {'nested': {'restart': False}}),
+                     ('nested-args', {'nested': ['RESTART_GAME']})]
+        for field, value in variants:
+            with self.subTest(field=field, value=value):
+                step = self.owned_load_step()
+                if field == 'tool':
+                    step['tool'] = value
+                elif field == 'operation':
+                    step['args']['operation'] = value
+                elif field == 'nested-args':
+                    step['args']['extra'] = value
+                elif field == 'nested-request':
+                    step['args']['request']['extra'] = value
+                else:
+                    step['args']['request'][field] = value
+                self.scenario['steps'] = [step]
+                m.write(self.root / 'scenario.json', self.scenario)
+                with self.assertRaisesRegex(ValueError, 'forbids restarts'):
+                    self.register()
+
     def test_expired_authority_does_not_claim(self):
         self.register()
         with patch('time.time', return_value=self.request['deadlineUtc']+1):

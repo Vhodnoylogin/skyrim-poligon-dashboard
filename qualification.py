@@ -105,6 +105,16 @@ class Qualifications:
             raise ValueError('Qualification requires generic steps without probes/postSteps')
         for step in scenario['steps']:
             args = step.get('args', {})
+            request_args = args.get('request') if isinstance(args, dict) else None
+            if (step.get('tool') == 'platform' and isinstance(request_args, dict)
+                    and args.get('operation') == 'object.perform'
+                    and request_args.get('domain') == 'save-state'
+                    and request_args.get('action') == 'load-owned-disposable-once'
+                    and request_args.get('processRestart') is False):
+                # Same-process owned loads retain their exact native request; only
+                # this explicit false flag is excluded from the restart text scan.
+                args = {**args, 'request': {key: value for key, value in request_args.items()
+                                           if key != 'processRestart'}}
             if (step.get('tool') in ('console', 'game') or
                     'restart' in json.dumps(args).lower()):
                 raise ValueError('Qualification forbids restarts and arbitrary game/console commands')
