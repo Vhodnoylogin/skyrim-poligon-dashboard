@@ -30,6 +30,15 @@ def _sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+def _selected_profile_bytes(original, profile_name):
+    # Match only the value bytes. In multiline mode a dot also consumes CR,
+    # which would turn this one CRLF into LF and corrupt the exact witness.
+    expected, count = re.subn(rb'(?m)^selected_profile=[^\r\n]*',
+        lambda _: b'selected_profile=@ByteArray(' + profile_name.encode('ascii') + b')', original)
+    _require(count == 1, 'one original selected_profile setting required')
+    return expected
+
+
 def witness(plan, state_path, state, runner):
     config = plan['configuration']
     _require(config.get('game_edition') == 'se', 'SE copied-profile route required')
@@ -77,10 +86,7 @@ def witness(plan, state_path, state, runner):
     _require(backup.parent == run / 'backups' and re.fullmatch(r'[0-9]+', backup.name), 'same-run settings backup required')
     original = backup.read_bytes()
     _require(_sha(original) == original_sha, 'original settings backup hash changed')
-    text = original.decode('utf-8-sig')
-    expected, count = re.subn(r'(?m)^selected_profile=.*$', lambda _: 'selected_profile=@ByteArray(' + profile_name + ')', text)
-    _require(count == 1, 'one original selected_profile setting required')
-    expected = expected.encode('utf-8')  # Exactly the native runner's owned write.
+    expected = _selected_profile_bytes(original, profile_name)
     live = ini.read_bytes()
     _require(live == expected, 'settings differ beyond the owned selected_profile write')
     managers = [row.get('identity') for row in state.get('owned', []) if row.get('role') == 'mo2']

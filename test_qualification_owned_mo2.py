@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import unittest
 
 import polygon as m
+import qualification_owned_mo2 as owned_mo2
 import test_qualification as fixtures
 
 
@@ -127,6 +128,57 @@ class OwnedMO2Tests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'selected_profile write'):
                     self.verify()
                 self.assertEqual(self.calls, [])
+
+    def test_selected_profile_preserves_exact_line_endings_and_unrelated_bytes(self):
+        originals = (
+            b'[General]\nselected_profile=@ByteArray(Core)\notherSetting=preserve\n',
+            b'[General]\r\nselected_profile=@ByteArray(Core)\r\notherSetting=preserve\r\n',
+            b'[General]\nselected_profile=@ByteArray(Core)\r\notherSetting=preserve\n',
+            b'[General]\r\nselected_profile=@ByteArray(Core)\notherSetting=preserve\r\n',
+            b'[General]\r\nselected_profile=@ByteArray(Core)\r\notherSetting=preserve',
+            b'[General]\notherSetting=preserve\nselected_profile=@ByteArray(Core)',
+            b'\xef\xbb\xbf[General]\r\nselected_profile=@ByteArray(Core)\r\notherSetting=\xc5\xbe\r\n',
+        )
+        for original in originals:
+            with self.subTest(original=original):
+                replacement = b'selected_profile=@ByteArray(' + self.profile_name.encode('ascii') + b')'
+                expected = original.replace(b'selected_profile=@ByteArray(Core)', replacement)
+                self.assertEqual(owned_mo2._selected_profile_bytes(original, self.profile_name), expected)
+
+    def test_crlf_witness_accepts_only_the_profile_value_change(self):
+        original = self.original.replace(b'\n', b'\r\n')
+        self.backup.write_bytes(original)
+        original_sha = m.digest(self.backup)
+        plan = copy.deepcopy(self.plan)
+        for pin in plan['pins']:
+            if Path(pin['path']) == self.f.ini:
+                pin['sha256'] = original_sha
+        self.state['snapshots'][0]['sha256'] = original_sha
+        m.write(self.state_path, self.state)
+        expected = original.replace(b'selected_profile=@ByteArray(Core)',
+            b'selected_profile=@ByteArray(' + self.profile_name.encode('ascii') + b')')
+        self.f.ini.write_bytes(expected)
+        witness = owned_mo2.witness(plan, self.state_path, self.state, self.runner)
+        self.assertEqual(witness['liveSha256'], m.digest(self.f.ini))
+        self.assertEqual(self.f.ini.read_bytes(), expected)
+        for changed in (expected.replace(b'otherSetting=preserve', b'otherSetting=changed'),
+                        expected.replace(b'\r\n', b'\n', 1), expected[:-2]):
+            with self.subTest(changed=changed):
+                self.calls.clear()
+                self.f.ini.write_bytes(changed)
+                with self.assertRaisesRegex(ValueError, 'selected_profile write'):
+                    owned_mo2.witness(plan, self.state_path, self.state, self.runner)
+                self.assertEqual(self.calls, [])
+
+    def test_missing_or_duplicate_selected_profile_refuses_for_all_line_endings(self):
+        for original in (b'[General]\r\notherSetting=preserve\r\n',
+                         b'selected_profile=a\nselected_profile=b\n',
+                         b'selected_profile=a\r\nselected_profile=b\r\n',
+                         b'selected_profile=a\r\nselected_profile=b',
+                         b'selected_profile=a\nselected_profile=b\r\n'):
+            with self.subTest(original=original):
+                with self.assertRaisesRegex(ValueError, 'one original selected_profile'):
+                    owned_mo2._selected_profile_bytes(original, self.profile_name)
 
     def test_backup_change_or_snapshot_hash_change_refuses(self):
         self.backup.write_bytes(b'changed backup')

@@ -285,9 +285,16 @@ def collect(p, plan, run):
     folder = p.local / 'qualifications' / plan['id']
     state = _api().read(Path(run) / 'state.json')
     _require(state.get('done') is True and state.get('restored') is True and not state.get('restoreErrors'), 'native completion/restoration required before companion collection')
-    summary = companion_evidence.collect(_Context(plan, folder), order_view(plan), run)
+    context, admission_pins = _Context(plan, folder), []
+    if (folder / 'first-manual-client').exists():
+        from qualification_manual_client import collection_context
+        context, admission_pins = collection_context(p, plan, folder, run)
+    summary = companion_evidence.collect(context, order_view(plan), run)
     _require(summary is not None, 'strict component evidence unavailable')
     summary.update(scope='tool-qualification-only', subjectModAccepted=False, physicsQualified=False)
+    if admission_pins:
+        summary['firstManualClientAdmission'] = True
+        summary['pins'] = sorted({item['path']: item for item in summary['pins'] + admission_pins}.values(), key=lambda item: item['path'])
     return summary
 
 
