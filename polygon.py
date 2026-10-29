@@ -1961,7 +1961,7 @@ def main(argv=None):
     note.add_argument("--category", choices=["observation", "player_instruction", "tool_bug", "tool_suspected_bug", "tool_improvement"], required=True)
     note.add_argument("--text", required=True)
     sub.add_parser("qualification-register", help="Operator-only candidate lease; never launches").add_argument("request", type=Path)
-    for name in ('qualification-release', '_release-qualification', 'qualification-record-diagnostic', 'qualification-abandon-prepared'):
+    for name in ('qualification-release', '_release-qualification', 'qualification-record-diagnostic', 'qualification-abandon-prepared', 'qualification-collect-mo2-boundary'):
         item = sub.add_parser(name)
         item.add_argument('id')
         item.add_argument('review', type=Path)
@@ -1987,6 +1987,9 @@ def main(argv=None):
             result = (reconcile if args.command == 'qualification-reconcile-pre-native' else finish)(polygon, args.id, args.review)
         elif args.command == 'qualification-record-diagnostic':
             from qualification_diagnostic import record
+            result = record(polygon, args.id, args.review)
+        elif args.command == 'qualification-collect-mo2-boundary':
+            from qualification_mo2_collection import record
             result = record(polygon, args.id, args.review)
         elif args.command == "qualification-abandon-prepared": result = polygon.qualification_abandon_prepared(args.id, args.review)
         elif args.command == "qualification-release": result = polygon.qualification_release(args.id, args.review)

@@ -27,8 +27,13 @@ def implementation_pins():
             for p in sorted(_api().HERE.glob('*.py'))]
 
 
-def _sources(plan, review, plan_path):
+def _sources(plan, review, plan_path, *, managed_mo2_boundary=False):
     m = _api()
+    boundary = None
+    if managed_mo2_boundary:
+        # Completion-only failed-run bridge: not a caller-selected pin skip.
+        from qualification_mo2_boundary import validate
+        boundary = validate(plan, review, plan_path)
     receipt_path = _pin(review['originalDashboardExport'])
     receipt = m.read(receipt_path)
     if (receipt.get('schemaVersion') != 1 or receipt.get('kind') != 'original-dashboard-source-export'
@@ -54,6 +59,8 @@ def _sources(plan, review, plan_path):
     # Every original source remains independently preserved in the export above.
     for pin in plan['pins']:
         source = Path(pin['path'])
+        if boundary and source == boundary['ini']:
+            continue  # Original bytes and exact restored native boundary verified above.
         is_source = source.parent == root and source.suffix == '.py'
         if not (is_source and source.name in ('polygon.py', 'qualification.py')):
             _pin(pin)
