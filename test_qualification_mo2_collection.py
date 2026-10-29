@@ -96,6 +96,7 @@ class ManagedMo2CollectionTests(unittest.TestCase):
             'originalDashboardExport': self.pin(self.export), 'implementationPins': diagnostic.implementation_pins(),
             'state': self.pin(self.run / 'state.json'), 'result': self.pin(self.run / 'result.json'),
             'worker': self.pin(self.folder / 'worker.json'), 'childExit': self.pin(self.folder / 'child-exit.json'),
+            'managerCloseSteps': self.pin(self.steps_path),
             'observer': self.pin(self.observer_path), 'profileArchivePins': [self.pin(self.archive / 'settings.ini')],
             'profileArchiveDirectories': []}
         self.rows = [{'pid': 999, 'name': 'python.exe'}]
@@ -207,7 +208,46 @@ class ManagedMo2CollectionTests(unittest.TestCase):
     def test_wrong_manager_close_or_candidate_source_refuses(self):
         self.steps[0]['identity'] = dict(self.manager, birth=999)
         self.steps_path.write_text(json.dumps(self.steps[0]), encoding='utf-8')
+        self.review['managerCloseSteps'] = self.pin(self.steps_path)
         self.refuses()
+
+    def test_changed_candidate_source_is_not_the_reviewed_close_control_flow(self):
+        self.runner.write_text('# Changed original executed runner')
+        self.refuses()
+
+    def test_review_swap_before_lock_cannot_create_pointer_or_snapshot(self):
+        def changing_observer(pin):
+            m.write(self.review_path, dict(self.review, summary='Different bytes after initial read'))
+            return self.native
+        with patch.object(collection, '_observer', side_effect=changing_observer):
+            self.refuses()
+        self.assertFalse((self.folder / collection.SNAPSHOTS).exists())
+
+    def swap_after_verify(self, target):
+        original_verify = collection.verify
+        def swapping_verify(*args, **kwargs):
+            captured = original_verify(*args, **kwargs)
+            if target == 'pointer':
+                replacement = self.root / 'replacement-review.json'
+                m.write(replacement, dict(self.review, summary='Unverified replacement review'))
+                m.write(self.folder / collection.POINTER, self.pin(replacement))
+            else:
+                m.write(self.run / 'result.json', dict(self.result, reason='Replaced after verification'))
+            return captured
+        with patch.object(collection, 'verify', side_effect=swapping_verify):
+            with self.assertRaisesRegex(ValueError, 'pin mismatch'):
+                self.record()
+        row = self.p.qualification_show(self.identity)
+        self.assertEqual(row['status'], 'running')
+        self.assertIsNone(row['packet'])
+        self.assertFalse((self.folder / 'packet.json').exists())
+        self.assertEqual(len(self.p.pipeline_status()['holds']), 1)
+
+    def test_pointer_swap_after_verify_before_packet_assembly_is_not_adopted(self):
+        self.swap_after_verify('pointer')
+
+    def test_evidence_swap_after_verify_before_packet_write_is_not_adopted(self):
+        self.swap_after_verify('result')
 
     def test_another_original_input_drift_is_not_waived(self):
         (self.root / 'scenario.json').write_text('{"changed":true}')

@@ -165,11 +165,9 @@ def validate(plan, review, plan_path):
     idle = _identity(state['preflight']['idleMO2'])
     if Path(idle['path']) != Path(plan['configuration']['mo2_exe']) or state.get('borrowedMO2'):
         raise ValueError('Exact owned idle-manager close required')
-    steps_path = run / 'steps.jsonl'
-    with steps_path.open('rb') as stream:
-        steps_raw = stream.read(MAX_BYTES + 1)
-    if len(steps_raw) > MAX_BYTES:
-        raise ValueError('Managed-close evidence exceeds bounded size')
+    steps_path, steps_raw = read_pin(review['managerCloseSteps'])
+    if steps_path != run / 'steps.jsonl':
+        raise ValueError('Exact original manager-close steps evidence required')
     steps = [document(line) for line in steps_raw.splitlines() if line.strip()]
     closes = [step for step in steps if step.get('kind') == 'idle-mo2-graceful-close']
     if (len(closes) != 1 or closes[0].get('identity') != idle

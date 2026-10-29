@@ -507,21 +507,24 @@ class Qualifications:
         packet['testResult'] = self.test_projection(plan['orderData'], packet)
         packet['collectionFindings'] = self.collection_findings(state_path.parent)
         # This is evidence for operator/tool-chat review, never automatic platform acceptance.
-        managed_paths, managed_boundary = [], None
+        managed_evidence = None
         if (folder / 'managed-mo2-collection.json').exists():
             from qualification_mo2_collection import verify
-            managed_paths, managed_boundary = verify(self, row, plan)
+            managed_evidence = verify(self, row, plan)
         else:
             self.qualification_verify(row, authority=False)
-        if managed_boundary is not None:
-            packet.update(managedMo2Collection=m.read(folder / 'managed-mo2-collection.json'),
-                          managedMo2Boundary=managed_boundary, qualificationPassed=False,
+        if managed_evidence is not None:
+            packet.update(managedMo2Collection=managed_evidence['reviewReference'],
+                          managedMo2Boundary=managed_evidence['summary'], qualificationPassed=False,
                           qualificationOutcome='unqualified', holdRetained=True)
-            packet['files'].extend({'path': str(path), 'sha256': m.digest(path)} for path in managed_paths)
+            packet['files'].extend(managed_evidence['files'])
         if (folder / 'collection-repair.json').exists():
             from qualification_collection_repair import evidence_pins
             packet['collectionRepair'] = m.read(folder / 'collection-repair.json')
             packet['files'].extend(evidence_pins(self, identity))
+        if managed_evidence is not None:
+            from qualification_mo2_collection import recheck
+            recheck(managed_evidence)
         m.write(folder / 'packet.json', packet)
         with self.connect() as con:
             con.execute("UPDATE qualifications SET status='recorded',packet=? WHERE id=?", (json.dumps({'path': str(folder / 'packet.json'), 'sha256': m.digest(folder / 'packet.json')}), identity))
