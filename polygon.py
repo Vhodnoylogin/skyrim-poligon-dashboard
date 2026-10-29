@@ -333,6 +333,50 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                  "vrstartup.exe", "vrdashboard.exe", "vrwebhelper.exe", "vrprismhost.exe"}
         return not any(p["name"].lower() in names for p in native.processes())
 
+    def queued_preparation_started(self, con, row):
+        """Keep actual/ambiguous preparation ownership even after its release expires."""
+        if row["mode"] != "automatic" or row["packet"] is not None or row["delivery"] is not None or row["mailbox_id"] is not None:
+            return True
+        for table, key in (("attempts", "id"), ("platform_attempts", "id"),
+                           ("session_members", "order_id"), ("cycle_slots", "order_id"),
+                           ("retry_attempts", "order_id"), ("operator_platform_bindings", "order_id"),
+                           ("operator_bound_admissions", "id"), ("notification_results", "id")):
+            if con.execute(f"SELECT 1 FROM {table} WHERE {key}=?", (row["id"],)).fetchone():
+                return True
+        history = con.execute("SELECT status FROM events WHERE id=? ORDER BY seq", (row["id"],)).fetchall()
+        if [event["status"] for event in history] != ["queued", "released"]:
+            return True
+        folder = self.evidence_dir(row["id"])
+        try:
+            attributes = folder.lstat()
+        except FileNotFoundError:
+            return False
+        if folder.is_symlink() or getattr(attributes, "st_file_attributes", 0) & 0x400 or not folder.is_dir():
+            return True
+        # Service diagnostics alone are not a dispatch/preparation witness. This
+        # narrow installation check does not make an order withdrawable.
+        for path in folder.iterdir():
+            if (path.name != "service-findings.jsonl" or path.is_symlink()
+                    or getattr(path.lstat(), "st_file_attributes", 0) & 0x400 or not path.is_file()):
+                return True
+        return False
+
+    def pending_released_batch(self, con):
+        for row in con.execute("SELECT jobs.* FROM jobs JOIN released_orders ON jobs.id=released_orders.id WHERE jobs.status='queued'").fetchall():
+            if self.queued_preparation_started(con, row):
+                return True
+            order = json.loads(row["request"])
+            if order.get("cycle") is not None:
+                return True
+            try:
+                # Reuse exact launch authority (including optional deadline and
+                # original owner hash); never renew/replace an expired release.
+                self.check_launch_authorization(order, connection=con)
+            except (ValueError, OSError):
+                continue
+            return True
+        return False
+
     def grant_slot(self):
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -349,10 +393,11 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                     result["status"] = "blocked"
                     return result
                 return self.slot_view(existing)
-            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone() or con.execute("SELECT id FROM retry_attempts WHERE status IN ('running','collecting')").fetchone():
+            if con.execute("SELECT id FROM jobs WHERE status='running'").fetchone() or con.execute("SELECT id FROM game_sessions WHERE status IN ('preparing','running','finalizing')").fetchone() or con.execute("SELECT id FROM retry_attempts WHERE status IN ('running','collecting')").fetchone() or con.execute("SELECT id FROM qualifications WHERE status IN ('prepared','running')").fetchone():
                 return {"status": "game_busy"}
-            # A manually released finite batch finishes before changing its installation.
-            if con.execute("SELECT jobs.id FROM jobs JOIN released_orders ON jobs.id=released_orders.id WHERE jobs.status='queued'").fetchone():
+            # Current released work/preparation owns installation; an untouched
+            # expired release is retained history, not an indefinite lease.
+            if self.pending_released_batch(con):
                 return {"status": "manual_batch_pending"}
             if not con.execute("SELECT id FROM cycle_slots WHERE status='waiting'").fetchone():
                 return {"status": "idle"}

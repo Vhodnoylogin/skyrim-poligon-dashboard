@@ -88,10 +88,22 @@ python <repository>/polygon.py --root <ROOT> slot-request <ticket.json>
 ```
 
 Polygon's existing heartbeat calls slot-next when no game/recovery/hold owns the
-installation. It grants the oldest waiting eligible ticket (FIFO). A already
-released finite standard batch drains before a new installation reservation; new
+installation. It grants the oldest waiting eligible ticket (FIFO). A currently
+authorized released finite standard batch drains before a new installation reservation; new
 unreleased standard orders wait. Each completed cycle iteration goes to the tail
 when it requests its next slot, so a fast origin cannot bypass waiting B/C.
+
+An expired or changed-owner release for an otherwise untouched queued order is
+retained history, not a permanent installation lease. The grant check reuses the
+ordinary per-order launch authorization; releases without an optional deadline
+retain that existing meaning. Only exact queued/released history and no prepared
+attempt, platform, group, slot, retry, operator binding, result or dispatch files
+may be ignored for this purpose. A regular service-findings.jsonl alone records
+diagnostics, not dispatch. Unknown files/history and every active/prepared owner
+remain barriers even after authorization expires. This check never withdraws,
+edits, requeues, reauthorizes or notifies an old order, changes its release, clears
+a hold, or grants permission to execute it. Withdrawal and launch checks retain
+their stricter existing rules.
 
 ```text
 python <repository>/polygon.py --root <ROOT> slot-next

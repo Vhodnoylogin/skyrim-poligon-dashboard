@@ -558,6 +558,117 @@ class Tests(unittest.TestCase):
         self.p.request_slot(self.ticket("slot-later", "cycle-1", "test-cycle"))
         self.assertEqual(self.p.grant_slot()["status"], "manual_batch_pending")
 
+    def expired_install_fixture(self):
+        now = time.time()
+        self.automatic_submit()
+        self.p.release_batch(self.approval(False, deadlineUtc=now + 60))
+        self.p.register_cycle(self.approval(deadlineUtc=now + 3600))
+        self.p.request_slot(self.ticket("slot-later", "cycle-1", "test-cycle"))
+        idle = patch.object(self.p, "environment_idle", return_value=False)
+        idle.start()
+        self.addCleanup(idle.stop)
+        return now + 61
+
+    def test_expired_inert_release_is_not_an_install_lease_and_history_is_unchanged(self):
+        after_deadline = self.expired_install_fixture()
+        self.p.note("test-1", "tool_notice", "Offline preparation diagnostic; no dispatch")
+        note = self.p.evidence_dir("test-1") / "service-findings.jsonl"
+        original_db, original_note = self.p.db.read_bytes(), note.read_bytes()
+        original_approval = (self.root / "batch-1.json").read_bytes()
+        original_order = self.p.get("test-1")
+        self.assertFalse(self.p.unprepared_order("test-1"))
+        with patch.object(mod.time, "time", return_value=after_deadline):
+            self.assertEqual(self.p.grant_slot()["status"], "external_game_or_vr_busy")
+            with self.assertRaisesRegex(ValueError, "expired or provenance changed"):
+                self.p.check_launch_authorization(json.loads(original_order["request"]))
+        self.assertEqual(self.p.db.read_bytes(), original_db)
+        self.assertEqual(note.read_bytes(), original_note)
+        self.assertEqual((self.root / "batch-1.json").read_bytes(), original_approval)
+        self.assertEqual(self.p.get("test-1"), original_order)
+        self.assertFalse(self.p.unprepared_order("test-1"))
+        self.assertEqual(self.p.slots()[0]["status"], "waiting")
+
+    def test_release_without_deadline_keeps_its_existing_install_barrier(self):
+        self.automatic_submit()
+        path = self.approval(False)
+        approval = mod.read(path)
+        del approval["deadlineUtc"]
+        mod.write(path, approval)
+        self.p.release_batch(path)
+        with patch.object(mod.time, "time", return_value=time.time() + 86400):
+            self.assertEqual(self.p.grant_slot()["status"], "manual_batch_pending")
+
+    def test_changed_release_owner_evidence_is_not_a_fresh_install_lease(self):
+        self.expired_install_fixture()
+        # Only the batch's evidence changes; the incoming cycle retains its pin.
+        path = self.root / "batch-1.json"
+        approval = mod.read(path)
+        owner = self.root / "batch-owner.txt"
+        owner.write_bytes((self.root / "owner-start.txt").read_bytes())
+        approval["ownerAuthorization"]["path"] = str(owner)
+        # Isolated registered fixture before simulating evidence loss.
+        with self.p.connect() as con:
+            con.execute("UPDATE releases SET authorization=? WHERE id='batch-1'",
+                        (json.dumps(approval, sort_keys=True, ensure_ascii=False),))
+        owner.write_text("Changed owner evidence", encoding="utf-8")
+        self.assertEqual(self.p.grant_slot()["status"], "external_game_or_vr_busy")
+
+    def test_prepared_queue_traces_remain_install_barriers_after_release_expiry(self):
+        after_deadline = self.expired_install_fixture()
+        mutations = [
+            ("INSERT INTO attempts VALUES('test-1',1)", "DELETE FROM attempts"),
+            ("INSERT INTO platform_attempts VALUES('test-1','{}','hash')", "DELETE FROM platform_attempts"),
+            ("INSERT INTO session_members VALUES('test-1','session',0)", "DELETE FROM session_members"),
+            ("INSERT INTO retry_attempts VALUES('retry-1','test-1','{}',1,'queued',NULL,NULL,NULL,NULL,NULL)", "DELETE FROM retry_attempts"),
+            ("INSERT INTO operator_platform_bindings VALUES('test-1','test-1','{}','binding.json','hash')", "DELETE FROM operator_platform_bindings"),
+            ("INSERT INTO operator_bound_admissions VALUES('test-1','{}')", "DELETE FROM operator_bound_admissions"),
+            ("INSERT INTO notification_results VALUES('test-1','report','eligible','ready')", "DELETE FROM notification_results"),
+            ("INSERT INTO cycle_slots(id,cycle_id,iteration,order_id,request,status) VALUES('shadow','other',1,'test-1','{}','waiting')", "DELETE FROM cycle_slots WHERE id='shadow'"),
+            ("UPDATE jobs SET packet='orphan.json' WHERE id='test-1'", "UPDATE jobs SET packet=NULL WHERE id='test-1'"),
+        ]
+        with patch.object(mod.time, "time", return_value=after_deadline):
+            for mutation, undo in mutations:
+                with self.subTest(mutation=mutation):
+                    with self.p.connect() as con:
+                        con.execute(mutation)
+                    self.assertEqual(self.p.grant_slot()["status"], "manual_batch_pending")
+                    with self.p.connect() as con:
+                        con.execute(undo)
+
+    def test_orphan_dispatch_files_and_factual_history_keep_expired_barrier(self):
+        after_deadline = self.expired_install_fixture()
+        folder = self.p.evidence_dir("test-1")
+        folder.mkdir(parents=True)
+        with patch.object(mod.time, "time", return_value=after_deadline):
+            for name in ("request.json", "config.json", "executor.log"):
+                with self.subTest(name=name):
+                    path = folder / name
+                    path.write_text("retained preparation", encoding="utf-8")
+                    self.assertEqual(self.p.grant_slot()["status"], "manual_batch_pending")
+                    path.unlink()
+            with self.p.connect() as con:
+                self.p.event(con, "test-1", "running", "Retained factual dispatch witness")
+            self.assertEqual(self.p.grant_slot()["status"], "manual_batch_pending")
+
+    def test_active_owners_and_prepared_qualification_never_expire_open(self):
+        after_deadline = self.expired_install_fixture()
+        with patch.object(mod.time, "time", return_value=after_deadline):
+            with self.p.connect() as con:
+                con.execute("UPDATE jobs SET status='running' WHERE id='test-1'")
+            self.assertEqual(self.p.grant_slot()["status"], "game_busy")
+            with self.p.connect() as con:
+                con.execute("UPDATE jobs SET status='queued' WHERE id='test-1'")
+                con.execute("INSERT INTO qualifications VALUES('qualification','{}','prepared',1,NULL)")
+            self.assertEqual(self.p.grant_slot()["status"], "game_busy")
+
+    def test_one_current_batch_member_still_blocks_after_an_expired_inert_member(self):
+        after_deadline = self.expired_install_fixture()
+        self.order["id"] = "test-2"
+        self.automatic_submit()
+        self.p.release_batch(self.approval(False, id="batch-2", orderIds=["test-2"], deadlineUtc=after_deadline + 3600))
+        with patch.object(mod.time, "time", return_value=after_deadline):
+            self.assertEqual(self.p.grant_slot()["status"], "manual_batch_pending")
+
     def test_external_manual_game_refuses_preparation_grant(self):
         self.p.register_cycle(self.approval())
         self.p.request_slot(self.ticket("slot-later", "cycle-1", "test-cycle"))
