@@ -1,5 +1,14 @@
 # First-case diagnostic admission (experimental version1)
 
+Future-admission representation repair: ordinary submit resolves Windows input
+path spelling. Freeze and native-receipt comparison accept only case/separator
+differences of the same current pinned file, preserving every pin position,
+role/hash and other specification field. Raw draft/order identities remain
+distinct and immutable; the frozen plan records the actual submitted identity.
+This repair does not migrate, amend, abandon or repin an already registered
+preparation. A preparation frozen against917f409 remains bound to917f409 and
+requires a separately reviewed supported settlement/revision protocol.
+
 This operator-only route runs one real **schema2 subject** on an explicitly
 unqualified platform while retaining its failed qualification hold. It does not
 qualify/release tools, accept a mod, switch the global host, or authorize work.

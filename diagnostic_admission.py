@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import math
+import ntpath
 import os
 from pathlib import Path
 import subprocess
@@ -553,7 +554,10 @@ def freeze(p, path):
             raise ValueError('Exact untouched installed schema2 cycle subject required')
         p.validate_cycle(con, order); p.verify_inputs(order)
         draft = read_pin(request['prospectiveSubject'])
-        if subject_contract.subject_identity(order) != subject_contract.subject_identity(draft):
+        comparable_draft = copy.deepcopy(draft)
+        comparable_draft['inputs'] = order['inputs']
+        if (subject_contract.subject_identity(order) != subject_contract.subject_identity(comparable_draft)
+                or not _same_input_representation(draft['inputs'], order['inputs'])):
             raise ValueError('Installed subject differs from reviewed prospective first-case specification')
         receipt = read_pin(review['installationReceipt'])
         _installation_receipt(request, order, receipt)
@@ -712,6 +716,35 @@ def _installation_intent(request, plan, audit, draft):
     subject_contract.validate(draft['subjectPlan'])
 
 
+def _same_input_representation(original, submitted):
+    """Ordinary submit resolves path spelling; immutable raw identities stay raw.
+
+    Admit only Windows case/separator spelling of the same current pinned file.
+    No alias/dot normalization, reordered pins or other field changes qualify.
+    Unchanged pins retain the ordinary full verify_inputs guards at freeze.
+    """
+    if not isinstance(original, list) or not isinstance(submitted, list) or len(original) != len(submitted):
+        return False
+    for left, right in zip(original, submitted):
+        if not isinstance(left, dict) or not isinstance(right, dict) or set(left) != set(right):
+            return False
+        if left == right:
+            continue
+        if ({k: v for k, v in left.items() if k != 'path'} != {k: v for k, v in right.items() if k != 'path'}
+                or not isinstance(left.get('path'), str) or not isinstance(right.get('path'), str)
+                or ntpath.normcase(left['path']) != ntpath.normcase(right['path'])):
+            return False
+        first = pin(_short_pin(left)); second = _absolute(right['path'])
+        # Reuse the exact ordinary submit canonicalizer, after ancestor guards.
+        resolved_first = str(Path(left['path']).resolve())
+        resolved_second = str(Path(right['path']).resolve())
+        if (ntpath.normcase(left['path']) != ntpath.normcase(resolved_first)
+                or resolved_first != resolved_second or not first.samefile(second)):
+            return False
+        pin(_short_pin(right))
+    return True
+
+
 def _installation_receipt(request, order, receipt):
     if (receipt.get('kind') != 'diagnostic-native-installation-receipt'
             or receipt.get('preparationId') != request['id'] or receipt.get('slotId') != request['slotId']
@@ -720,7 +753,7 @@ def _installation_receipt(request, order, receipt):
             or receipt.get('archiveInstalled') is not True or receipt.get('managerRefreshed') is not True
             or receipt.get('installationSettled') is not True or receipt.get('profile') != order['profile']
             or not receipt.get('verifiedBy') or not receipt.get('reason') or not receipt.get('evidence')
-            or receipt.get('installedInputs') != order['inputs']):
+            or not _same_input_representation(receipt.get('installedInputs'), order['inputs'])):
         raise ValueError('Complete native UI/Installed accounting/profile/current input receipt required')
     expected = sorted((x['target'], x['source']['sha256']) for x in request['installation'])
     if sorted((x['path'], x['sha256']) for x in receipt.get('vfsWinners', [])) != expected:

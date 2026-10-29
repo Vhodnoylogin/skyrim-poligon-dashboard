@@ -238,6 +238,61 @@ class DiagnosticTests(unittest.TestCase):
                                    'platformPlanSha256': m.subject_contract.identity(self.p.attempt_plan(self.order)),
                                    'verifiedBy': 'offline', 'reason': 'One immutable subject only'})
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows ordinary-submit path spelling')
+    def test_ordinary_submit_case_normalization_freezes_without_rewriting_raw_evidence(self):
+        draft_path = Path(self.request['prospectiveSubject']['path']); draft = m.read(draft_path)
+        for value in draft['inputs']:
+            value['path'] = value['path'].swapcase().replace('\\', '/')
+        m.write(draft_path, draft)
+        d.APPROVED_SUBJECT_DRAFT_SHA256 = m.digest(draft_path)
+        d.APPROVED_SUBJECT_SPECIFICATION_SHA256 = m.subject_contract.subject_identity(draft)
+        self.request['prospectiveSubject'] = d.file_pin(draft_path); m.write(self.prepare_path, self.request)
+        original_bytes = draft_path.read_bytes()
+        self.prepare(); self.install_submit()
+        self.assertNotEqual(m.subject_contract.subject_identity(draft), m.subject_contract.subject_identity(self.order))
+        self.receipt_mutator = lambda value: value.update(installedInputs=copy.deepcopy(draft['inputs']))
+        self.freeze()
+        self.assertEqual(draft_path.read_bytes(), original_bytes)
+        self.assertEqual(self.p.attempt_plan(self.order)['subjectSpecificationSha256'], m.subject_contract.subject_identity(self.order))
+
+    def test_path_representation_does_not_admit_role_hash_order_or_alias_changes(self):
+        self.prepare(); self.install_submit(); pins = self.order['inputs']
+        for mutation in ('role', 'hash', 'order', 'alias', 'dot'):
+            changed = copy.deepcopy(pins)
+            if mutation == 'role': changed[0]['role'] = 'dependency'
+            elif mutation == 'hash': changed[0]['sha256'] = '0'*64
+            elif mutation == 'order': changed.reverse()
+            elif mutation == 'alias':
+                alias = self.root/'same-bytes.bin'; alias.write_bytes(Path(pins[0]['path']).read_bytes()); changed[0]['path'] = str(alias)
+            elif mutation == 'dot': changed[0]['path'] = str(Path(pins[0]['path']).parent) + '/./' + Path(pins[0]['path']).name
+            with self.subTest(mutation=mutation): self.assertFalse(d._same_input_representation(changed, pins))
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows case variant')
+    def test_changed_current_bytes_refuse_case_representation(self):
+        self.prepare(); self.install_submit(); original = copy.deepcopy(self.order['inputs'])
+        original[0]['path'] = original[0]['path'].swapcase()
+        Path(self.order['inputs'][0]['path']).write_bytes(b'changed')
+        with self.assertRaises(ValueError): d._same_input_representation(original, self.order['inputs'])
+
+    def test_path_representation_does_not_waive_other_subject_fields(self):
+        original = self.order_template
+        self.order_template = lambda: {**original(), 'purpose': 'Unreviewed different subject purpose'}
+        self.prepare(); self.install_submit()
+        with self.assertRaisesRegex(ValueError, 'prospective first-case specification'):
+            self.freeze()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows case variant')
+    def test_file_change_during_samefile_check_refuses_representation(self):
+        self.prepare(); self.install_submit(); original = copy.deepcopy(self.order['inputs'])
+        original[0]['path'] = original[0]['path'].swapcase()
+        samefile = Path.samefile
+        def changed(first, second):
+            result = samefile(first, second)
+            Path(second).write_bytes(b'changed after initial hash')
+            return result
+        with patch.object(Path, 'samefile', changed):
+            with self.assertRaises(ValueError): d._same_input_representation(original, self.order['inputs'])
+
     def test_composed_ordinary_parent_child_semantics_collect_report_and_hold(self):
         self.ready()
         self.assertTrue(self.prepare()['duplicate'])
