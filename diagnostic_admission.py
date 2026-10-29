@@ -95,6 +95,9 @@ def saved(p, order_id, con=None):
 
 def _request(row):
     request = json.loads(row['request'])
+    if request.get('preparationRenewal'):
+        import diagnostic_preparation_renewal
+        diagnostic_preparation_renewal.validate_request(request)
     if read_pin(request['requestPin']) != request['originalRequest']:
         raise ValueError('Immutable diagnostic preparation review changed')
     if source_pins() != request['dashboardPins'] or inventory(request['executor']) != request['executorPins']:

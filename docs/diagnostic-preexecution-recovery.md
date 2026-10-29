@@ -1,5 +1,20 @@
 # Diagnostic pre-execution recovery
 
+## Retaining the installed subject under renewed owner authority
+
+`diagnostic-preparation-renew REVIEW.json` renews only a never-frozen technical
+preparation after explicit current owner authorization. The queued subject,
+installed files, slot/acknowledgement, retained qualification hold and historical
+starts stay unchanged. The old request, cycle policy and source are captured in
+an immutable certificate and audit event; no game or installation is performed.
+New review fields are defined by `diagnostic_preparation_renewal.py`.
+
+Certificate files use immutable content-addressed names. A refused transaction
+may leave an unregistered capture, which is preserved as evidence. A later retry
+captures fresh observations without overwriting or adopting that orphan. Only a
+committed audit event registers a renewal; successful duplicate requests return
+that original registration. Freeze and execute remain separate existing commands.
+
 This cleanup-only protocol settles a never-frozen/consumed technical preparation.
 It grants no game start, source overlay, qualification or new test authority.
 The original queued subject's entire row, raw order and history remain unchanged;

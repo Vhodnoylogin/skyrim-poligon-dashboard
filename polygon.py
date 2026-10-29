@@ -2013,6 +2013,7 @@ def main(argv=None):
     for command in ('diagnostic-recovery-reserve', 'diagnostic-recovery-complete'):
         sub.add_parser(command).add_argument('request', type=Path)
     sub.add_parser('diagnostic-recovery-guard').add_argument('request',type=Path)
+    sub.add_parser('diagnostic-preparation-renew').add_argument('request',type=Path)
     for command in ('diagnostic-recovery-inspect', 'diagnostic-recovery-show'):
         sub.add_parser(command).add_argument('id')
     args = parser.parse_args(argv)
@@ -2023,7 +2024,10 @@ def main(argv=None):
             print(json.dumps(result,ensure_ascii=False,indent=2))
             return 0
         polygon = Polygon(session_root(args.root))
-        if args.command in ('diagnostic-recovery-reserve', 'diagnostic-recovery-complete', 'diagnostic-recovery-inspect', 'diagnostic-recovery-show'):
+        if args.command == 'diagnostic-preparation-renew':
+            import diagnostic_preparation_renewal
+            result = diagnostic_preparation_renewal.renew(polygon, args.request)
+        elif args.command in ('diagnostic-recovery-reserve', 'diagnostic-recovery-complete', 'diagnostic-recovery-inspect', 'diagnostic-recovery-show'):
             import diagnostic_recovery
             functions = {'diagnostic-recovery-reserve': diagnostic_recovery.reserve, 'diagnostic-recovery-complete': diagnostic_recovery.complete,
                          'diagnostic-recovery-inspect': diagnostic_recovery.inspect, 'diagnostic-recovery-show': diagnostic_recovery.show}
