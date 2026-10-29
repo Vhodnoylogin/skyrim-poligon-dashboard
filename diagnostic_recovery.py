@@ -1,8 +1,10 @@
 """Two-phase cleanup only: preserve the queued subject and all launch barriers."""
 import base64
+from contextlib import contextmanager
 import copy
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 import time
 
@@ -175,7 +177,7 @@ def _assessment(review, request, managed_ini):
     return assessment,index_pin
 
 
-def _profiles(request, restored):
+def _profile_inventory(request):
     profile=Path(request['profileBaseline']['profile']); name=request['profileBaseline']['newModName']
     listing=[];references=[]
     directories=list(profile.parent.iterdir())
@@ -187,6 +189,12 @@ def _profiles(request, restored):
         listing.append(value)
         for line in raw.splitlines():
             if line.strip().lstrip('+-').casefold()==name.casefold():references.append((str(path),line.strip()))
+    return listing,references
+
+
+def _profiles(request, restored):
+    listing,references=_profile_inventory(request)
+    profile=Path(request['profileBaseline']['profile']);name=request['profileBaseline']['newModName']
     expected=[] if restored else [(str(profile/'modlist.txt'),'+'+name)]
     if references!=expected:raise ValueError('Another profile references the globally removed mod, or source reference changed')
     return listing
@@ -353,6 +361,9 @@ def reserve(p, path):
                   'installationReceiptData':installation_receipt,'installationEvidence':installation_receipt['evidence'],
                   'hold': dict(con.execute('SELECT * FROM pipeline_holds WHERE id=?', ('qualification-' + request['qualificationId'],)).fetchone()),
                   'preimageIndex': index_pin}
+        modlist=next(x for x in assessment['freshPreimages'] if Path(x['path']).name=='modlist.txt')
+        postimage={'path':modlist['path'],'sha256':modlist['currentSha256']}
+        record['modlistPostimage']={'pin':postimage,'base64':base64.b64encode(d.read_hashed(postimage)).decode('ascii')}
         _source(request)
         if _current(request,assessment,False)!=profile_inventory:raise ValueError('Profile inventory changed before reservation')
         if d.read_pin(review_pin) != review:
@@ -503,3 +514,140 @@ def show(p, identity):
         raise ValueError('Unknown recovery')
     return {'id': identity, 'status': row['status'], 'historicallyCompleted': settled(p, identity),
             'launchGranted': False, 'newCleanupGranted': False}
+
+
+def _readonly(root):
+    """Existing runtime only. Never call Polygon's schema/seed constructor."""
+    class ReadOnlyPolygon(d.api().Polygon):
+        def __init__(self, folder):
+            self.root=d._absolute(str(folder)).resolve();self.local=self.root/'local/skyrim-polygon'
+            self.db=d._absolute(str(self.local/'queue.sqlite3'))
+            if not self.db.is_file():raise ValueError('Existing recovery database required; guard creates nothing')
+        @contextmanager
+        def connect(self):
+            connection=sqlite3.connect(self.db.as_uri()+'?mode=ro',uri=True,timeout=15)
+            connection.row_factory=sqlite3.Row
+            try:
+                connection.execute('PRAGMA query_only=ON');connection.execute('BEGIN')
+                yield connection
+            finally:connection.close()
+    return ReadOnlyPolygon(root)
+
+
+def _owned_subset(assessment):
+    root=d._absolute(assessment['rootMod'])
+    expected={Path(x['path']):x['sha256'] for x in assessment['modFiles']}
+    directories={parent for path in expected for parent in path.parents if root in parent.parents}
+    present=[];absent=[]
+    if root.exists():
+        if not root.is_dir():raise ValueError('Owned mod root is not a directory')
+        for entry in root.rglob('*'):
+            path=d._absolute(str(entry))
+            if path in expected and path.is_file():d.pin({'path':str(path),'sha256':expected[path]})
+            elif path not in directories or not path.is_dir():raise ValueError('Unknown/changed owned transition entry')
+    for item in [*assessment['modFiles'],*assessment['newDownloadFiles']]:
+        path=d._absolute(item['path'])
+        if path.exists():d.pin(d._short_pin(item));present.append(d._short_pin(item))
+        else:absent.append(item['path'])
+    return present,absent
+
+
+def _partial(record, request):
+    assessment=record['assessment'];present,absent=_owned_subset(assessment)
+    fresh={Path(x['path']):x for x in assessment['freshPreimages']}
+    for item in request['protectedInputs']:
+        if Path(item['path']) not in fresh:d.pin(item)
+    modlist=Path(request['profileBaseline']['profile'])/'modlist.txt';post=record['modlistPostimage']
+    raw=base64.b64decode(post['base64'],validate=True)
+    if (post['pin']!={'path':str(modlist),'sha256':fresh[modlist]['currentSha256']}
+            or hashlib.sha256(raw).hexdigest()!=post['pin']['sha256']):raise ValueError('Captured modlist postimage changed')
+    before=d.read_hashed({'path':fresh[modlist]['backup'],'sha256':fresh[modlist]['sha256']})
+    variants={'postimage':raw,'preimage':before}
+    name=request['profileBaseline']['newModName'].encode('utf-8');lines=raw.splitlines(keepends=True)
+    matches=[i for i,line in enumerate(lines) if line.rstrip(b'\r\n')==b'+'+name]
+    if len(matches)==1:
+        disabled=list(lines);disabled[matches[0]]=b'-'+disabled[matches[0]][1:];variants['disabled-new-mod']=b''.join(disabled)
+    current_pin=d.file_pin(modlist);current=d.read_hashed(current_pin)
+    state=next((key for key,value in variants.items() if current==value),None)
+    if state is None:raise ValueError('Only exact owned modlist postimage/one-line toggle/fresh preimage allowed')
+    for path,item in fresh.items():
+        if path==modlist:continue
+        if path==Path(assessment['managedIniPath']):
+            gui_delta(d.read_hashed({'path':item['backup'],'sha256':item['sha256']}),d.read_hashed(d.file_pin(path)))
+        else:d.pin({'path':str(path),'sha256':item['sha256']})
+    listing,references=_profile_inventory(request)
+    expected=[] if state=='preimage' else [(str(modlist),('+' if state=='postimage' else '-')+name.decode('utf-8'))]
+    if references!=expected:raise ValueError('Another profile or unknown mod reference changed')
+    profiles=copy.deepcopy(record['profiles'])
+    for item in profiles:
+        if Path(item['path'])==modlist:item['sha256']=current_pin['sha256']
+    if listing!=profiles:raise ValueError('Other profile inventory changed')
+    for item in assessment['diagnosticEvidencePathFacts']:
+        if item['exists'] is not False or d._absolute(item['path']).exists():raise ValueError('Dispatch/runtime footprint changed')
+    return {'present':present,'absent':absent,'modlistState':state,'profilePins':listing,
+            'managedIniPin':d.file_pin(assessment['managedIniPath'])}
+
+
+def guard(root, path):
+    """Current read-only scope. Trusted caller already owns SessionMutex.
+
+    Never acquire that mutex here: actors invoke this CLI across a subprocess
+    while holding it. Mutex ownership is a caller precondition, not API evidence.
+    """
+    query,query_pin=d.document(path)
+    keys={'schemaVersion','kind','id','reservedReviewPin','stage'}
+    if (set(query) not in (keys,keys|{'archive'}) or query['schemaVersion']!=1
+            or query['kind']!='diagnostic-preexecution-restoring-guard'
+            or query['stage'] not in {'pre-archive','partial'}
+            or ('archive' in query)!=(query['stage']=='partial')):
+        raise ValueError('Exact two-stage read-only restoring guard query required')
+    p=_readonly(root)
+    with p.connect() as con:
+        row=_row(con,query['id'])
+        if not row or row['status']!='restoring' or row['completion'] is not None:raise ValueError('Current restoring recovery required')
+        record=json.loads(row['request']);review=record['review']
+        if record['reviewPin']!=query['reservedReviewPin'] or d.read_pin(record['reviewPin'])!=review:
+            raise ValueError('Exact reserved review pin required')
+        if d.source_pins()!=record['implementationPins']:raise ValueError('Restoring implementation changed')
+        request,current=_legacy(p,con,review,'restoring');expected=copy.deepcopy(record['legacy']);expected['diagnostic']['status']='restoring'
+        if current!=expected:raise ValueError('Current legacy record/ACK/owner tuple changed')
+        qrow=con.execute('SELECT request FROM qualifications WHERE id=?',(request['qualificationId'],)).fetchone()
+        qplan=json.loads(qrow['request'])
+        if request['executor']!=qplan['executor'] or request['executorPins']!=qplan['executorPins']:raise ValueError('Exact original native observer required')
+        _source(request)  # BEFORE importing selected observer code.
+        runner=order_platform.activate(request['executor'])
+        d._barriers(p,request,con,own_slot=True)
+        if dict(con.execute('SELECT * FROM pipeline_holds WHERE id=?',(record['hold']['id'],)).fetchone())!=record['hold']:
+            raise ValueError('Retained hold changed')
+        assessment,index_pin=_assessment(review,request,current['managedIni'])
+        if assessment!=record['assessment'] or index_pin!=record['preimageIndex']:
+            raise ValueError('Reserved assessment/index snapshot changed')
+        archive_pins=[]
+        if query['stage']=='pre-archive':
+            if _current(request,record['assessment'],False)!=record['profiles']:raise ValueError('Profile baseline changed')
+            proof={'present':[d._short_pin(x) for x in [*record['assessment']['modFiles'],*record['assessment']['newDownloadFiles']]],
+                   'absent':[],'modlistState':'postimage','profilePins':record['profiles'],
+                   'managedIniPin':d.file_pin(record['assessment']['managedIniPath'])}
+        else:
+            archive_pins=_archive(query,record['assessment'],row['id'],p)
+            proof=_partial(record,request)
+        native=d._native_closed(p,request,runner,con)
+        if query['stage']=='pre-archive':
+            if _current(request,record['assessment'],False)!=record['profiles']:raise ValueError('Postimage changed during guard')
+        elif _partial(record,request)!=proof:raise ValueError('Owned transition changed during guard')
+        for value in [query_pin,*_reserve_proofs(record),*archive_pins,proof['managedIniPin'],*proof['present'],*proof['profilePins']]:d.pin(value)
+        present,absent=_owned_subset(record['assessment'])
+        if present!=proof['present'] or absent!=proof['absent']:raise ValueError('Owned source transition changed at guard return')
+        profiles,references=_profile_inventory(request)
+        modlist=str(Path(request['profileBaseline']['profile'])/'modlist.txt');name=request['profileBaseline']['newModName']
+        expected_references=[] if proof['modlistState']=='preimage' else [(modlist,('-' if proof['modlistState']=='disabled-new-mod' else '+')+name)]
+        if profiles!=proof['profilePins'] or references!=expected_references:raise ValueError('Profile ownership/references changed at guard return')
+        d.pin(proof['managedIniPin'])
+        if _row(con,row['id'])!=row:raise ValueError('Recovery record changed during guard')
+    return {'schemaVersion':1,'kind':'validated-current-restoring-scope','record':{'id':row['id'],'diagnosticId':row['diagnostic_id'],
+                'status':'restoring','requestSha256':_hash(row['request'])},'reservedReview':{'pin':record['reviewPin'],'review':review},
+            'implementationPins':record['implementationPins'],'stage':query['stage'],'stageProof':proof,'nativeIdleObservation':native,
+            'allowedPostimages':[d._short_pin(x) for x in [*record['assessment']['modFiles'],*record['assessment']['newDownloadFiles']]],
+            'freshModlistBackup':next(x for x in record['assessment']['freshPreimages'] if Path(x['path']).name=='modlist.txt'),
+            'archiveVerified':query['stage']=='partial','copyOnly':query['stage']=='pre-archive',
+            'callerMustOwnSessionMutex':True,'mutexOwnershipProvedByGuard':False,'newCleanupGranted':False,'launchGranted':False}

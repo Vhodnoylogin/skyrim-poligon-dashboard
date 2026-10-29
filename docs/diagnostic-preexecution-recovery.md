@@ -64,3 +64,34 @@ and does not demand old live provider/manager/source files remain unchanged
 forever. Duplicate completion returns the same historical closed receipt;
 duplicate reservation grants no new cleanup. Lost response, partial restoration
 or failed proof retains `restoring`, its slot and barriers. No timeout infers zero.
+
+## Current restoring-scope guard for the reviewed actor
+
+Status/show output is not a validated current lease. The actor must hold the
+existing SessionMutex across a child CLI call and the bounded action that
+follows it. `diagnostic-recovery-guard QUERY.json` NEVER acquires that mutex;
+calling it in a subprocess while its parent owns the lock must not deadlock.
+Lock ownership is the reviewed caller's precondition, not a claim proved by this
+API. The entrypoint opens only an EXISTING database in SQLite mode=ro/query_only,
+before the normal constructor can create schema/witness rows. It creates nothing.
+
+The exact query keys are schemaVersion=1, kind=diagnostic-preexecution-restoring-guard,
+id, reservedReviewPin and stage. `pre-archive` requires all13owned postimages and
+returns COPY-ONLY current scope; the actor independently copies/resumes its known
+archive without overwriting unknown data. `partial` additionally REQUIRES archive
+pin and all13archived members before any absence/removal is accepted. Remaining
+source files may only retain their known hashes or be absent; known parent
+directories, reparse guards and unrelated profile/provider pins stay enforced.
+Source modlist bytes may be only the exact captured postimage, its ONE new-mod
+enabled→disabled prefix change, or the exact fresh preimage. No newline/other
+entry normalization is admitted. New reserve captures the exact postimage bytes;
+there is no migration of an older registered recovery to this implementation.
+
+Successful output kind validated-current-restoring-scope binds current record
+hash, reserved review, implementation pins, allowed13postimages, fresh modlist
+backup, factual stage proof and raw idle observations. newCleanupGranted and
+launchGranted remain false; mutexOwnershipProvedByGuard is false. Failed,
+completed, foreign, stale or changed records return no usable scope. The actor
+must check exit status and all expected identity/pin fields immediately before
+each bounded action and decode child JSON as UTF-8. No UI callback, private DB
+access, source overlay, new deadline/cap or new preparation is provided.

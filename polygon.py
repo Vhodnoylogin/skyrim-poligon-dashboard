@@ -2012,10 +2012,16 @@ def main(argv=None):
     sub.add_parser('diagnostic-show', help='Read-only current dashboard reservation proof; no native-idle or launch approval').add_argument('id')
     for command in ('diagnostic-recovery-reserve', 'diagnostic-recovery-complete'):
         sub.add_parser(command).add_argument('request', type=Path)
+    sub.add_parser('diagnostic-recovery-guard').add_argument('request',type=Path)
     for command in ('diagnostic-recovery-inspect', 'diagnostic-recovery-show'):
         sub.add_parser(command).add_argument('id')
     args = parser.parse_args(argv)
     try:
+        if args.command=='diagnostic-recovery-guard':
+            import diagnostic_recovery
+            result=diagnostic_recovery.guard(session_root(args.root),args.request)
+            print(json.dumps(result,ensure_ascii=False,indent=2))
+            return 0
         polygon = Polygon(session_root(args.root))
         if args.command in ('diagnostic-recovery-reserve', 'diagnostic-recovery-complete', 'diagnostic-recovery-inspect', 'diagnostic-recovery-show'):
             import diagnostic_recovery
