@@ -177,7 +177,7 @@ class Qualifications:
                 reference = registered.get(prior.get('id'))
                 if (prior.get('schemaVersion') != 1 or prior.get('kind') not in
                         ('qualification-held-diagnostic', 'tool-qualification-result',
-                         'qualification-pre-native-result', 'qualification-preclient-diagnostic', 'qualification-startup-diagnostic', 'qualification-prebinding-diagnostic') or
+                         'qualification-pre-native-result', 'qualification-preclient-diagnostic', 'qualification-startup-diagnostic', 'qualification-prebinding-diagnostic', 'qualification-anchor-startup-diagnostic') or
                         'cumulativeActualGameStartsAfter' not in prior or
                         prior['cumulativeActualGameStartsAfter'] is not None or
                         not reference or Path(reference['path']).resolve() != file or
@@ -478,6 +478,10 @@ class Qualifications:
                 review = json.loads(prior['review'])
                 if m.digest(review['path']) != review['sha256']: raise ValueError('Pre-native review changed')
                 return packet
+            if packet.get('kind') == 'qualification-anchor-startup-diagnostic':
+                from qualification_anchor_startup import verify_packet
+                verify_packet(self, plan, packet)
+                return packet
             if packet.get('kind') in ('qualification-preclient-diagnostic', 'qualification-startup-diagnostic', 'qualification-prebinding-diagnostic'):
                 from qualification_preclient import verify_packet
                 verify_packet(self, plan, packet)
@@ -583,7 +587,7 @@ class Qualifications:
     def qualification_successful_result(plan, packet):
         """Allow declared tool observations, without converting them into passed assertions."""
         m = api()
-        if packet.get('kind') in ('qualification-preclient-diagnostic', 'qualification-startup-diagnostic', 'qualification-prebinding-diagnostic'):
+        if packet.get('kind') in ('qualification-preclient-diagnostic', 'qualification-startup-diagnostic', 'qualification-prebinding-diagnostic', 'qualification-anchor-startup-diagnostic'):
             return False
         if 'companion' in plan:
             from qualification_companion import successful
