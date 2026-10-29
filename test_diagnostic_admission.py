@@ -466,6 +466,34 @@ class DiagnosticTests(unittest.TestCase):
             else: struct.pack_into('<I', raw, 48, 24)
             with self.assertRaises(ValueError): bf._dump(raw, str(self.provider), state['game'])
 
+    def standard_release(self, deadline=None):
+        order = self.order_template(); order.pop('cycle'); order['id'] = 'standard'
+        order['sourceChat'] = 'other'; order['sourceThreadId'] = 'other-origin'
+        for item in order['inputs']:
+            item['sha256'] = m.digest(item['path'])  # Actual current old bytes.
+        path = self.root/'standard.json'; m.write(path, order); self.p.submit(path)
+        release = {'schemaVersion': 1, 'id': 'batch', 'orderIds': ['standard'], 'ownerAuthorization': self.auth}
+        if deadline is not None: release['deadlineUtc'] = deadline
+        path = self.root/'batch.json'; m.write(path, release); self.p.release_batch(path)
+
+    def test_valid_released_standard_work_blocks_even_under_retained_q1_hold(self):
+        self.standard_release(time.time()+1800)
+        with self.assertRaisesRegex(ValueError, 'Valid released work'):
+            self.prepare()
+        with self.p.connect() as con:
+            self.assertEqual(con.execute("SELECT status FROM cycle_slots WHERE id='slot'").fetchone()[0], 'waiting')
+            self.assertEqual(con.execute('SELECT COUNT(*) FROM diagnostic_admissions').fetchone()[0], 0)
+        self.assertEqual(self.p.get('standard')['status'], 'queued')
+
+    def test_only_proven_expired_inert_standard_release_is_ignored(self):
+        self.standard_release(time.time()+1800)
+        with self.p.connect() as con:
+            release = json.loads(con.execute("SELECT authorization FROM releases WHERE id='batch'").fetchone()[0])
+            release['deadlineUtc'] = time.time()-1
+            con.execute("UPDATE releases SET authorization=? WHERE id='batch'", (json.dumps(release),))
+        self.prepare()
+        self.assertEqual(self.p.get('standard')['status'], 'queued')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -7,6 +7,7 @@ import contextlib
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -261,6 +262,39 @@ def _installed(request, after):
             raise ValueError('Installed composition differs from exact reviewed delta: ' + str(path))
 
 
+def _pending_released_authority(p, con):
+    """Classify release authority without mistaking the retained hold for expiry.
+
+    The ordinary helper runs only when no holds exist. Here unknown provenance
+    stays a barrier; ONLY positively expired, untouched releases may be skipped.
+    """
+    rows = con.execute("SELECT j.*,r.authorization FROM jobs j JOIN released_orders x ON x.id=j.id JOIN releases r ON r.id=x.release_id WHERE j.status='queued'").fetchall()
+    for row in rows:
+        if p.queued_preparation_started(con, row):
+            return True
+        try:
+            order = json.loads(row['request'])
+            if order.get('cycle') is not None:
+                return True
+            approval = json.loads(row['authorization']); owner = approval['ownerAuthorization']
+            for key in ('threadId', 'messageId', 'quote', 'verifiedBy'):
+                api().required_string(owner, key)
+            text = read_hashed(_short_pin(owner)).decode('utf-8-sig')
+            if owner['quote'] not in text or order['id'] not in approval['orderIds']:
+                return True
+            deadline = approval.get('deadlineUtc')
+            if deadline is None:
+                return True  # A release without a deadline retains its authority.
+            if type(deadline) not in (int, float) or not math.isfinite(deadline):
+                return True
+            if time.time() < deadline:
+                return True
+            # Exact untouched/expired release with intact owner provenance only.
+        except (KeyError, ValueError, OSError, TypeError, UnicodeError):
+            return True
+    return False
+
+
 def prepare(p, path):
     """Grant only exact FIFO preparation, no installation or game start."""
     m = api(); path = _absolute(str(path)); raw, request_pin = document(path)
@@ -355,7 +389,7 @@ def prepare(p, path):
         for existing in con.execute("SELECT id FROM diagnostic_admissions WHERE status IN ('preparing','frozen','consumed')"):
             raise ValueError('Another diagnostic owns unresolved preparation/admission: ' + existing['id'])
         _installed(request, False)
-        if p.pending_released_batch(con):
+        if _pending_released_authority(p, con):
             raise ValueError('Valid released work owns installation before diagnostic preparation')
         slot = None
         for candidate in con.execute("SELECT * FROM cycle_slots WHERE status='waiting' ORDER BY seq").fetchall():
