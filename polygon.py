@@ -2010,10 +2010,19 @@ def main(argv=None):
     for command in ('diagnostic-prepare', 'diagnostic-freeze', 'diagnostic-execute', 'diagnostic-complete'):
         sub.add_parser(command).add_argument('request', type=Path)
     sub.add_parser('diagnostic-show', help='Read-only current dashboard reservation proof; no native-idle or launch approval').add_argument('id')
+    for command in ('diagnostic-recovery-reserve', 'diagnostic-recovery-complete'):
+        sub.add_parser(command).add_argument('request', type=Path)
+    for command in ('diagnostic-recovery-inspect', 'diagnostic-recovery-show'):
+        sub.add_parser(command).add_argument('id')
     args = parser.parse_args(argv)
     try:
         polygon = Polygon(session_root(args.root))
-        if args.command == 'diagnostic-show':
+        if args.command in ('diagnostic-recovery-reserve', 'diagnostic-recovery-complete', 'diagnostic-recovery-inspect', 'diagnostic-recovery-show'):
+            import diagnostic_recovery
+            functions = {'diagnostic-recovery-reserve': diagnostic_recovery.reserve, 'diagnostic-recovery-complete': diagnostic_recovery.complete,
+                         'diagnostic-recovery-inspect': diagnostic_recovery.inspect, 'diagnostic-recovery-show': diagnostic_recovery.show}
+            result = functions[args.command](polygon, args.id if hasattr(args, 'id') else args.request)
+        elif args.command == 'diagnostic-show':
             import diagnostic_admission
             result = diagnostic_admission.show(polygon, args.id)
         elif args.command in ('diagnostic-prepare', 'diagnostic-freeze', 'diagnostic-execute', 'diagnostic-complete'):

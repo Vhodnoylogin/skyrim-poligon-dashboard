@@ -220,12 +220,16 @@ def _native_closed(p, request, runner, con):
                  'vrwebhelper.exe', 'vrprismhost.exe'}
     if any(x['name'].lower() in forbidden for x in rows):
         raise ValueError('Current game/VR process blocks diagnostic admission')
+    checked_owners=[];checked_states=[]
     for ident in [worker, *[x['identity'] for x in state.get('owned', [])]]:
         if (not isinstance(ident, dict) or type(ident.get('pid')) is not int or ident['pid'] <= 0
-                or type(ident.get('birth')) is not int or ident['birth'] <= 0 or not ident.get('path')
-                or runner.native.alive(ident)
-                or any(x['pid'] == ident['pid'] for x in rows) and runner.native.identity(ident['pid']) is None):
+                or type(ident.get('birth')) is not int or ident['birth'] <= 0 or not ident.get('path')):
             raise ValueError('Prior native owner alive or identity unknown')
+        alive=runner.native.alive(ident)
+        observed=runner.native.identity(ident['pid']) if not alive and any(x['pid']==ident['pid'] for x in rows) else None
+        if alive or any(x['pid']==ident['pid'] for x in rows) and observed is None:
+            raise ValueError('Prior native owner alive or identity unknown')
+        checked_owners.append({'expected':ident,'alive':alive,'observedReusedPid':observed})
     runtimes = {Path(qplan['configuration']['runtime'])}
     if p.host().get('runnerConfig'):
         runtimes.add(Path(api().read(p.host()['runnerConfig'])['runtime']))
@@ -233,13 +237,15 @@ def _native_closed(p, request, runner, con):
         runtimes.add(Path(request['configuration']['runtime']))
     for runtime in runtimes:
         for path in (runtime / 'runs').glob('*/state.json'):
-            prior = document(path)[0]
+            prior,state_pin = document(path)
+            checked_states.append({'state':state_pin,'game':prior.get('game'),'order':prior.get('order'),'done':prior.get('done'),'restored':prior.get('restored')})
             if prior.get('done') is not True or prior.get('restored') is not True or prior.get('restoreErrors'):
                 raise ValueError('Unfinished native session blocks diagnostic admission')
             observed_game = prior.get('game')
             if (isinstance(observed_game, dict) and observed_game.get('birth', 0) >= state['game']['birth']
                     and prior.get('order', {}).get('id') not in {'qualification-' + request['qualificationId'], request['orderId']}):
                 raise ValueError('Another later native game needs accounting review; no first-shot reset')
+    return {'observedAt':time.time(),'processes':rows,'checkedOwners':checked_owners,'runtimeStates':checked_states}
 
 
 def _barriers(p, request, con, own_slot=False, own_job=False):

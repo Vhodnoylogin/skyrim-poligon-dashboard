@@ -1,5 +1,9 @@
 # Skyrim-Poligon-Dashboard
 
+Cleanup of a never-started registered diagnostic uses the separate
+[two-phase pre-execution recovery](docs/diagnostic-preexecution-recovery.md).
+It preserves the queued subject and grants no game start or source migration.
+
 Tags: testing, tools, devbench
 
 This standalone chat tool routes mod test orders to one dedicated Codex chat. It is not
