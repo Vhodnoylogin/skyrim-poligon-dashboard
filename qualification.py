@@ -444,6 +444,9 @@ class Qualifications:
             if packet.get('collectionRepair'):
                 from qualification_collection_repair import verify_packet_archive
                 verify_packet_archive(packet)
+            if packet.get('managedMo2Collection'):
+                from qualification_mo2_collection import verify_packet_archive
+                verify_packet_archive(packet)
             return packet
         folder = self.local / 'qualifications' / identity
         if row['status'] != 'running' or not (folder / 'child-exit.json').is_file():
@@ -504,7 +507,17 @@ class Qualifications:
         packet['testResult'] = self.test_projection(plan['orderData'], packet)
         packet['collectionFindings'] = self.collection_findings(state_path.parent)
         # This is evidence for operator/tool-chat review, never automatic platform acceptance.
-        self.qualification_verify(row, authority=False)
+        managed_paths, managed_boundary = [], None
+        if (folder / 'managed-mo2-collection.json').exists():
+            from qualification_mo2_collection import verify
+            managed_paths, managed_boundary = verify(self, row, plan)
+        else:
+            self.qualification_verify(row, authority=False)
+        if managed_boundary is not None:
+            packet.update(managedMo2Collection=m.read(folder / 'managed-mo2-collection.json'),
+                          managedMo2Boundary=managed_boundary, qualificationPassed=False,
+                          qualificationOutcome='unqualified', holdRetained=True)
+            packet['files'].extend({'path': str(path), 'sha256': m.digest(path)} for path in managed_paths)
         if (folder / 'collection-repair.json').exists():
             from qualification_collection_repair import evidence_pins
             packet['collectionRepair'] = m.read(folder / 'collection-repair.json')
