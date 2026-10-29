@@ -346,7 +346,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.p.board()[0]["testOutcome"], "not_started")
 
     def test_root_from_checkout_location_is_never_guessed(self):
-        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {}, clear=True), patch.object(mod.Path, "cwd", return_value=Path(folder)):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {}, clear=True), patch.object(mod.Path, "cwd", return_value=Path(folder)), patch.object(mod.Path, "is_file", return_value=False):
             with self.assertRaisesRegex(ValueError, "--root"):
                 mod.session_root()
 

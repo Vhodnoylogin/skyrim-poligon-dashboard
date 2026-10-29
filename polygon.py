@@ -31,6 +31,7 @@ from tooling_retries import ToolingRetries
 from autotest_workflow import AutotestWorkflow
 from post_start_continuations import PostStartContinuations
 from qualification import Qualifications
+from slot_amendments import SlotAmendments
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 SHA = re.compile(r"[0-9a-f]{64}")
 READ_KINDS = {"state", "player", "refs", "scene", "vm", "world_observer"}
@@ -120,7 +121,7 @@ def owner_evidence(approval, path, require_deadline=True):
     return evidence
 
 
-class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinuations, Qualifications):
+class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinuations, Qualifications, SlotAmendments):
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.local = self.root / "local/skyrim-polygon"
@@ -152,6 +153,29 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
               UNIQUE(cycle_id,iteration));
             CREATE UNIQUE INDEX IF NOT EXISTS one_install_run_slot ON cycle_slots((1))
               WHERE status IN ('reserved','blocked');
+            CREATE TRIGGER IF NOT EXISTS slot_grant_witness_insert
+              AFTER INSERT ON cycle_slots
+              WHEN NEW.status IN ('reserved','blocked') OR NEW.receipt IS NOT NULL
+              BEGIN
+                INSERT INTO events(id,at,status,note)
+                VALUES(NEW.id,(julianday('now')-2440587.5)*86400.0,'slot_ever_granted',
+                       'SQLite witness: inserted reserved/blocked/acknowledged slot');
+              END;
+            CREATE TRIGGER IF NOT EXISTS slot_grant_witness_update
+              AFTER UPDATE OF status,receipt ON cycle_slots
+              WHEN OLD.status IN ('reserved','blocked') OR NEW.status IN ('reserved','blocked')
+                OR OLD.receipt IS NOT NULL OR NEW.receipt IS NOT NULL
+              BEGIN
+                INSERT INTO events(id,at,status,note)
+                VALUES(NEW.id,(julianday('now')-2440587.5)*86400.0,'slot_ever_granted',
+                       'SQLite witness: ' || OLD.status || ' -> ' || NEW.status || '; grant/ack state observed');
+              END;
+            INSERT INTO events(id,at,status,note)
+              SELECT id,(julianday('now')-2440587.5)*86400.0,'slot_ever_granted',
+                     'SQLite witness: retained reserved/blocked/acknowledged slot at initialization'
+              FROM cycle_slots
+              WHERE (status IN ('reserved','blocked') OR receipt IS NOT NULL)
+                AND NOT EXISTS(SELECT 1 FROM events WHERE events.id=cycle_slots.id AND status='slot_ever_granted');
             CREATE TABLE IF NOT EXISTS pipeline_holds (id TEXT PRIMARY KEY, note TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS final_reports (
               id TEXT PRIMARY KEY, request TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL);
@@ -289,6 +313,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                 raise ValueError("Slot needs delivered previous iterations without branches")
             con.execute("INSERT INTO cycle_slots(id,cycle_id,iteration,order_id,request,status) VALUES(?,?,?,?,?,'waiting')",
                         (request["id"], request["cycleId"], iteration, request["orderId"], canonical))
+            self.event(con, request["id"], "slot_requested", canonical)
         return {"id": request["id"], "status": "waiting"}
 
     def slots(self):
@@ -340,6 +365,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                     con.execute("UPDATE cycle_slots SET status='cancelled',note='Approval stopped/expired/changed' WHERE id=?", (row["id"],))
                     continue
                 con.execute("UPDATE cycle_slots SET status='reserved' WHERE id=?", (row["id"],))
+                self.event(con, row["id"], "slot_granted", json.dumps(self.slot_view(row), sort_keys=True))
                 result = self.slot_view(row)
                 result["status"] = "reserved"
                 return result
@@ -406,6 +432,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                     raise ValueError("Slot acknowledgment already fixed; legacy app receipts cannot authorize new preparation")
                 return {"id": slot, "duplicate": True}
             con.execute("UPDATE cycle_slots SET receipt=? WHERE id=?", (receipt, slot))
+            self.event(con, slot, "slot_acknowledged", receipt)
         return {"id": slot, "status": "acknowledged"}
 
     def clear_slot(self, slot, path):
@@ -427,6 +454,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                 raise ValueError("Withdraw/reconcile submitted order before clearance")
             con.execute("UPDATE cycle_slots SET status='released',note=? WHERE id=?",
                         (json.dumps(clearance, sort_keys=True), slot))
+            self.event(con, slot, "slot_cleared", json.dumps({"originalSlot": dict(row), "clearance": clearance}, sort_keys=True))
         return {"id": slot, "status": "released"}
 
     def stop_cycle(self, cycle, status, note):
@@ -1843,6 +1871,9 @@ def main(argv=None):
     batch.add_argument("authorization", type=Path)
     ticket = sub.add_parser("slot-request")
     ticket.add_argument("request", type=Path)
+    amendment = sub.add_parser("slot-amend", help="Independently reviewed writePaths correction of a never-granted preparation draft")
+    amendment.add_argument("id")
+    amendment.add_argument("amendment", type=Path)
     for name in ("slots", "slot-next"):
         sub.add_parser(name)
     sub.add_parser("pipeline-status")
@@ -1932,6 +1963,7 @@ def main(argv=None):
         elif args.command == "cycle-register": result = polygon.register_cycle(args.authorization)
         elif args.command == "batch-release": result = polygon.release_batch(args.authorization)
         elif args.command == "slot-request": result = polygon.request_slot(args.request)
+        elif args.command == "slot-amend": result = polygon.amend_slot(args.id, args.amendment)
         elif args.command == "slots": result = polygon.slots()
         elif args.command == "slot-next": result = polygon.grant_slot()
         elif args.command == "pipeline-status": result = polygon.pipeline_status()

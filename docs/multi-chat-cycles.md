@@ -75,6 +75,13 @@ scope and avoid overlapping code writers. Ticket metadata cannot authorize a
 cycle. Identical ticket submission is idempotent; the DB admits at most one ticket
 for a cycle iteration/order. A later iteration requires prior orders delivered.
 
+If a preparation draft was never granted, acknowledged, installed or submitted,
+an independent pinned review can correct only its writePaths with explicit
+`slot-amend`; read [preparation-draft-amendments.md](preparation-draft-amendments.md).
+The same reservation ID/FIFO/cycle/iteration/order and original authority/limits
+are retained. Ordinary slot-request does not revise drafts automatically. An
+unverifiable or previously granted slot cannot use this preparation-only path.
+
 ```text
 python <repository>/polygon.py --root <ROOT> pipeline-status
 python <repository>/polygon.py --root <ROOT> slot-request <ticket.json>

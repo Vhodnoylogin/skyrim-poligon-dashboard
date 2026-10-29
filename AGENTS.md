@@ -92,6 +92,10 @@ Keep external executors, drivers, game files, credentials, runtime configs,
 databases, evidence and speech recordings outside Git. Document how to acquire
 dependencies. Use Python 3.11+ standard library for runtime and tests. Check
 `python -m unittest discover -s . -p "test_*.py" -v` after relevant changes.
+For an ungranted preparation draft writePaths correction, read
+docs/preparation-draft-amendments.md and use the explicit supported slot-amend
+review path. Preserve original audit evidence, FIFO, authority and limits; no
+automatic amendment, grant, submitted-subject reopening or hold clearance.
 Verify the Git remote and name the repository before committing/pushing.
 In the owner's Skyrim VR project, reports and repository maps stay in its journal;
 use that journal's save.py for journal changes, regular Git for this business repo.
