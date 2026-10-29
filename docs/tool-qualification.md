@@ -199,3 +199,45 @@ hold. `qualification-run` on the same id remains refused after completion/releas
 Artifacts: `local/skyrim-polygon/qualifications/<id>/`; plan is also immutable in
 the qualifications SQLite table. `qualification-show` and `pipeline-status` expose
 the admission/lease status. This protocol changes no global host configuration.
+
+## Abandon a reservation refused before dispatch
+
+`qualification-abandon-prepared ID REVIEW.json` retires only an unstarted
+`prepared` reservation with null expiry/packet, no attempt row, no native or
+qualification dispatch artifacts, and an empty candidate runtime. This covers
+an input-pin refusal before `qualification-run` changes the row to running,
+including MO2 normalizing profile files while it closes. An outer operator
+intent alone does not prove native dispatch. Its original files remain intact.
+
+The review is schemaVersion1, kind `qualification-prepared-abandon-review`,
+with exact qualificationId, verifiedBy, reason, actual ownerAuthorization and
+true noDispatchReviewed, zeroStartsReviewed and installationSettled. Bind
+preparedRequestSha256 to SHA256 of the unchanged stored request's UTF-8 bytes.
+The pinned executor must remain unchanged. Under its native mutex and a SQLite
+write transaction the command verifies a complete no-game inventory, no active
+owner or unfinished host session, and no previously released/eligible work that
+could become runnable. A child/attempt, run artifact, ambiguity or changed
+reservation refuses abandonment; use the ordinary recovery path instead.
+
+The terminal `abandoned` row preserves its original request and null packet.
+An event retains the review/hash and zero actual starts; the cumulative baseline
+is unchanged, including null. Only its own routine reservation is removed;
+other holds and queues remain untouched. No pass, qualification, retry, fresh
+allowance or new launch follows. Reusing that id cannot dispatch it again. Any
+future reservation needs a fresh id, current frozen inputs and its own ordinary
+reviewed authority.
+
+Registration recognizes a historical `abandoned` reservation only through the
+supported exact `qualification_prepared` -> `qualification_prepared_abandoned`
+audit, unchanged stored-request hash, hash-checked original review/owner evidence,
+zero-start and unchanged cumulative accounting, null expiry/packet, and no own
+hold, admission or dispatch traces. A bare label, missing/changed/contradictory
+proof or an unknown lifecycle remains a blocker. Recognition changes no old row,
+event, file, allowance or result and cannot dispatch that identity again.
+
+Historical proof is not a current launch approval: old input pins, candidate
+source and unrelated later runtime contents need not remain unchanged forever.
+The exact old qualification ID appearing in later native state still contradicts
+its zero-start audit. Every new reservation keeps its own current owner authority
+and ordinary active-owner guards. Empty folders alone never settle an abandoned
+reservation; do not edit SQLite or manufacture an audit/review to unblock it.
