@@ -191,6 +191,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         self.init_qualifications()
         import order_platform
         order_platform.init(self)
+        import diagnostic_admission
+        diagnostic_admission.init(self)
 
     @contextlib.contextmanager
     def connect(self):
@@ -340,6 +342,7 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         for table, key in (("attempts", "id"), ("platform_attempts", "id"),
                            ("session_members", "order_id"), ("cycle_slots", "order_id"),
                            ("retry_attempts", "order_id"), ("operator_platform_bindings", "order_id"),
+                           ("diagnostic_admissions", "order_id"),
                            ("operator_bound_admissions", "id"), ("notification_results", "id")):
             if con.execute(f"SELECT 1 FROM {table} WHERE {key}=?", (row["id"],)).fetchone():
                 return True
@@ -617,6 +620,9 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             with self.connect() as con:
                 return self.check_launch_authorization(order, connection=con)
         con = connection
+        import diagnostic_admission
+        if diagnostic_admission.authorize(self, order, con):
+            return
         if con.execute("SELECT id FROM pipeline_holds").fetchone():
             raise ValueError("Shared tooling/recovery pipeline is held for owner review")
         slot = con.execute("SELECT * FROM cycle_slots WHERE status IN ('reserved','blocked')").fetchone()
@@ -808,6 +814,8 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                     request = json.loads(candidate["request"])
                     if con.execute('SELECT id FROM operator_platform_bindings WHERE order_id=?',(candidate['id'],)).fetchone():
                         continue  # Only reviewed atomic execute-bound admits these orders.
+                    if con.execute('SELECT id FROM diagnostic_admissions WHERE order_id=?',(candidate['id'],)).fetchone():
+                        continue  # Only the exact consumed diagnostic admits this unqualified order.
                     if request.get("cycle") is not None or con.execute("SELECT id FROM released_orders WHERE id=?", (candidate["id"],)).fetchone():
                         row = candidate
                         break
@@ -1277,6 +1285,11 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
 
     def verify_platform(self, order, require_file=True, attempt_id=None):
         plan = self.attempt_plan(order, attempt_id)
+        if plan.get('kind') == 'one-shot-diagnostic-attempt':
+            if attempt_id:
+                raise ValueError('Diagnostic admission cannot select a retry attempt')
+            import diagnostic_admission
+            return diagnostic_admission.verify_plan(self, order, plan, require_file)
         folder = self.local / "retry-attempts" / attempt_id if attempt_id else self.evidence_dir(order["id"])
         if require_file and read(folder / "platform-plan.json") != plan:
             raise ValueError("Retained platform plan file changed")
@@ -1465,6 +1478,11 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                   "reason": note, "runDirectory": str(run) if run else None,
                   "restored": restored, "files": files, "requestedData": order["collect"],
                   "analysis": None, "finishedAt": time.time()}
+        import diagnostic_admission
+        diagnostic = diagnostic_admission.saved(self, job)
+        if diagnostic:
+            packet['diagnostic'] = {'kind': 'one-shot-subject-diagnostic', 'id': diagnostic['id'],
+                                    'qualified': False, 'normalReleaseEligible': False}
         shared_path = folder / "shared-session.json"
         if shared_path.exists():
             packet["sharedSession"] = read(shared_path)
@@ -1548,12 +1566,16 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             write(folder / "config.json", config)
             write(folder / "scenario.json", scenario)
             with (folder / "executor.log").open("w", encoding="utf-8") as log:
-                child = subprocess.run([sys.executable, str(HERE / "polygon.py"), "--root", str(self.root), "_execute", row["id"]],
-                                       stdout=log, stderr=subprocess.STDOUT, shell=False)
+                command = [sys.executable, str(HERE / "polygon.py"), "--root", str(self.root), "_execute", row["id"]]
+                import diagnostic_admission
+                if diagnostic_admission.saved(self, order['id']):
+                    child_returncode = diagnostic_admission.dispatch(self, order, command, log)
+                else:
+                    child_returncode = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, shell=False).returncode
             self.reconcile()
             if self.get(row["id"])["status"] == "running":
                 # No complete restoration evidence: leave active barrier in place.
-                if child.returncode == 2 and not self.matching_runs(order):
+                if child_returncode == 2 and not self.matching_runs(order):
                     return self.finish(row["id"], "blocked", "Executor refused before a game session; see executor.log")
                 return {"id": row["id"], "status": "running", "reason": "Recovery/evidence reconciliation required; automatic retries prohibited"}
             return read(self.get(row["id"])["packet"])
@@ -1581,7 +1603,11 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
         for pin in read(self.evidence_dir(job) / "executor-pins.json"):
             if digest(pin["path"]) != pin["sha256"]:
                 raise ValueError("Executor changed after claim")
-        if order.get("schemaVersion") == 2 and plan.get("operatorSelection"):
+        diagnostic = order.get('schemaVersion') == 2 and plan.get('kind') == 'one-shot-diagnostic-attempt'
+        if diagnostic:
+            import order_platform
+            runner = order_platform.activate(plan['executor'])
+        elif order.get("schemaVersion") == 2 and plan.get("operatorSelection"):
             import order_platform
             if not plan.get('operatorAdmission') or order_platform.admission(self, order['id']) != plan['operatorAdmission']:
                 raise ValueError('Exact atomic operator admission is required before native dispatch')
@@ -1591,6 +1617,11 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
             from skyrim_autotest import runner
         from skyrim_autotest.config import load
         runner.configure(load(self.evidence_dir(job) / "config.json"))
+        if diagnostic:
+            import diagnostic_admission
+            with diagnostic_admission.child_guard(self, order, runner):
+                return runner.run(self.source_profile(order, runner), self.evidence_dir(job) / "scenario.json",
+                                  restart_idle_mo2=True, order={"id": job, "owner": order["sourceChat"]})
         return runner.run(self.source_profile(order, runner), self.evidence_dir(job) / "scenario.json",
                           restart_idle_mo2=True, order={"id": job, "owner": order["sourceChat"]})
 
@@ -1853,6 +1884,9 @@ class Polygon(SharedSessions, ToolingRetries, AutotestWorkflow, PostStartContinu
                 plan = con.execute("SELECT sha256 FROM platform_attempts WHERE id=?", (row["id"],)).fetchone()
                 item["platformPlanSha256"] = plan[0] if plan else None
                 item["workflow"] = "full-cycle" if cycle is not None else "autotest" if self.autotest_approval(con, row["id"]) else "standard"
+                diagnostic = con.execute('SELECT id,status FROM diagnostic_admissions WHERE order_id=?', (row['id'],)).fetchone()
+                if diagnostic:
+                    item['diagnostic'] = {'id': diagnostic['id'], 'status': diagnostic['status'], 'qualified': False}
                 item["cycleId"] = cycle["id"] if isinstance(cycle, dict) else None
                 item["awaitingOwnerStart"] = row["mode"] == "automatic" and row["status"] == "queued" and cycle is None and not con.execute("SELECT id FROM released_orders WHERE id=?", (row["id"],)).fetchone()
                 decision = con.execute("SELECT * FROM notification_results WHERE id=?", (row["id"],)).fetchone()
@@ -1973,10 +2007,22 @@ def main(argv=None):
         sub.add_parser(name).add_argument("id")
     for command in ('platform-bind', 'execute-bound'):
         sub.add_parser(command).add_argument('request', type=Path)
+    for command in ('diagnostic-prepare', 'diagnostic-freeze', 'diagnostic-execute', 'diagnostic-complete'):
+        sub.add_parser(command).add_argument('request', type=Path)
+    sub.add_parser('diagnostic-show', help='Read-only current dashboard reservation proof; no native-idle or launch approval').add_argument('id')
     args = parser.parse_args(argv)
     try:
         polygon = Polygon(session_root(args.root))
-        if args.command in ('platform-bind', 'execute-bound'):
+        if args.command == 'diagnostic-show':
+            import diagnostic_admission
+            result = diagnostic_admission.show(polygon, args.id)
+        elif args.command in ('diagnostic-prepare', 'diagnostic-freeze', 'diagnostic-execute', 'diagnostic-complete'):
+            import diagnostic_admission
+            result = {'diagnostic-prepare': diagnostic_admission.prepare,
+                      'diagnostic-freeze': diagnostic_admission.freeze,
+                      'diagnostic-execute': diagnostic_admission.execute,
+                      'diagnostic-complete': diagnostic_admission.complete}[args.command](polygon, args.request)
+        elif args.command in ('platform-bind', 'execute-bound'):
             import order_platform
             result = (order_platform.register if args.command == 'platform-bind' else order_platform.execute)(polygon, args.request)
         elif args.command == "submit": result = polygon.submit(args.order)

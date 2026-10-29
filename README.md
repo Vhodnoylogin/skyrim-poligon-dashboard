@@ -356,6 +356,11 @@ Chat consumers analyze only their own returned packet, not other chats' journals
 
 ## Verification
 
+The separately reviewed first-case [one-shot diagnostic admission](docs/one-shot-diagnostic-admission.md)
+can retain one known failed qualification hold while running one immutable
+schema2 subject on an explicitly unqualified platform. It is experimental,
+case-bound and grants no ordinary release, global qualification or extra attempt.
+
 Operator-only tool qualification can pin a different frozen executor for one
 exclusive attempt without changing global host configuration. Read
 [tool-qualification.md](docs/tool-qualification.md) for the separate authority,
