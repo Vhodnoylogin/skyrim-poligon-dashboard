@@ -33,6 +33,8 @@ APPROVED_SUBJECT_DRAFT_SHA256 = '0bdbcb785ea6cf22682aa054d9e0312dce19c17ad500636
 APPROVED_SUBJECT_SPECIFICATION_SHA256 = '9f507a7a1f2fd2cf202473370dfbcf852f7b1d5273a2a2a09038ff35dd73f3cf'
 APPROVED_SUBJECT_PLAN_SHA256 = '350edeff194133026f76a0fb7d0e40f7a67ed61999d12b38f839987609540e69'
 APPROVED_TESTING_SHA256 = '39c9ce78dc71069ae7b653270fb3d13cbe37c539838c5929ae13d24958e3c459'
+MF_ORDER_ID = 'morphbench-080-se-static-capsules-20261029-2'
+MF_AVAILABILITY_REVIEW_SHA256 = '1de14d29af941e46cb7ca8dbaed9d52cafd10f7b68576cdee545b7b0445d0d4c'
 
 
 def api():
@@ -201,6 +203,9 @@ def _authority(p, request, con):
     total = 1
     if type(accounting.get('actualGameStartsBefore')) is not int or accounting['actualGameStartsBefore'] != total or total >= accounting['maximumActualGameStarts']:
         raise ValueError('Actual task start budget differs/exhausted')
+    if request.get('releasedWorkDeferral'):
+        _deferral(p, con, request)
+    m.owner_evidence(request, Path(request['requestPin']['path']))
     return approval
 
 
@@ -262,7 +267,7 @@ def _installed(request, after):
             raise ValueError('Installed composition differs from exact reviewed delta: ' + str(path))
 
 
-def _pending_released_authority(p, con):
+def _pending_released_authority(p, con, request=None):
     """Classify release authority without mistaking the retained hold for expiry.
 
     The ordinary helper runs only when no holds exist. Here unknown provenance
@@ -284,6 +289,9 @@ def _pending_released_authority(p, con):
                 return True
             deadline = approval.get('deadlineUtc')
             if deadline is None:
+                if request and request.get('releasedWorkDeferral') and row['id'] == MF_ORDER_ID:
+                    _deferral(p, con, request)
+                    continue
                 return True  # A release without a deadline retains its authority.
             if type(deadline) not in (int, float) or not math.isfinite(deadline):
                 return True
@@ -293,6 +301,65 @@ def _pending_released_authority(p, con):
         except (KeyError, ValueError, OSError, TypeError, UnicodeError):
             return True
     return False
+
+
+def _deferral(p, con, request):
+    """Temporary first-case scheduling only; never mutate the deferred order."""
+    review = read_pin(request['releasedWorkDeferral'])
+    keys = {'schemaVersion', 'kind', 'diagnosticId', 'subjectSpecificationSha256', 'deadlineUtc',
+            'ownerAuthorization', 'availabilityReview', 'q1ExecutorInventorySha256',
+            'priorityEvidence', 'verifiedBy', 'reason'}
+    if (set(review) != keys or review['schemaVersion'] != 1 or review['kind'] != 'one-shot-unavailable-preparation-deferral'
+            or review['diagnosticId'] != request['id'] or review['subjectSpecificationSha256'] != APPROVED_SUBJECT_SPECIFICATION_SHA256
+            or review['deadlineUtc'] != request['deadlineUtc'] or not review['verifiedBy'] or not review['reason']
+            or not review['priorityEvidence'] or review['q1ExecutorInventorySha256'] != subject_contract.identity(request['executorPins'])
+            or review['availabilityReview']['sha256'] != MF_AVAILABILITY_REVIEW_SHA256):
+        raise ValueError('Exact independently reviewed first-case preparation-unavailability deferral required')
+    api().owner_evidence(review, Path(request['releasedWorkDeferral']['path']))
+    if order_platform.authority(review) != order_platform.authority(request):
+        raise ValueError('Deferral priority must retain the same current owner scope/deadline')
+    for value in review['priorityEvidence']:
+        pin(value)
+    availability = read_pin(review['availabilityReview'])
+    if (availability.get('kind') != 'read-only-pending-morphbench-deferral-path-review'
+            or availability.get('orderId') != MF_ORDER_ID or availability.get('status') != 'queued'
+            or availability.get('schemaVersion') != 2 or availability.get('releaseHasDeadlineUtc') is not False
+            or availability.get('actualNativeAttempts') != 0 or availability.get('packet') is not None
+            or availability.get('delivery') is not None or availability.get('liveWrites') is not False
+            or availability.get('nativeCalls') is not False or availability.get('DBWrites') is not False
+            or availability.get('scenarioSteps') != 15 or len(availability.get('unsupportedSteps', [])) != 14):
+        raise ValueError('Exact unchanged unavailable Morphbench review required')
+    row = con.execute('SELECT * FROM jobs WHERE id=?', (MF_ORDER_ID,)).fetchone()
+    if (not row or row['status'] != 'queued' or row['packet'] is not None or row['delivery'] is not None
+            or row['mailbox_id'] is not None or p.queued_preparation_started(con, row)
+            or hashlib.sha256(row['request'].encode('utf-8')).hexdigest() != availability['requestStringSha256']):
+        raise ValueError('Deferred subject must remain exactly queued and genuinely unprepared')
+    released = con.execute('SELECT x.release_id,r.authorization FROM released_orders x JOIN releases r ON r.id=x.release_id WHERE x.id=?', (MF_ORDER_ID,)).fetchone()
+    if (not released or released['release_id'] != availability['releaseId']
+            or hashlib.sha256(released['authorization'].encode('utf-8')).hexdigest() != availability['releaseStringSha256']):
+        raise ValueError('Deferred release changed; no cancellation or authority waiver')
+    approval = json.loads(released['authorization']); owner = approval['ownerAuthorization']
+    if (owner != availability['releaseOwnerEvidence'] or 'deadlineUtc' in approval
+            or owner['quote'] not in read_hashed(_short_pin(owner)).decode('utf-8-sig')):
+        raise ValueError('Original valid deferred release/owner provenance must remain unchanged')
+    events = [{'seq': x['seq'], 'status': x['status']} for x in con.execute('SELECT seq,status FROM events WHERE id=? ORDER BY seq', (MF_ORDER_ID,))]
+    if events != availability['events']:
+        raise ValueError('Deferred order history changed or contains preparation')
+    order = json.loads(row['request']); subject_contract.validate(order['subjectPlan'])
+    args = [{'name': x['name'], 'args': {'operation': x['operation'], **x.get('parameters', {})}} for x in order['subjectPlan']['steps']]
+    code = "import sys,json;from pathlib import Path;r=Path(sys.argv[1]).resolve();sys.path.insert(0,str(r));from skyrim_autotest.platform import validate;out=[]\nfor x in json.load(sys.stdin):\n try: validate(x['args'])\n except ValueError as e:\n  if str(e) not in {'Unsupported world observation','Unsupported semantic action'}: raise\n  out.append({'step':x['name'],'error':str(e)})\nprint(json.dumps(out))"
+    child = subprocess.run([sys.executable, '-c', code, request['executor']], input=json.dumps(args), capture_output=True, text=True, timeout=30)
+    if child.returncode or len(args) != 15 or json.loads(child.stdout) != availability['unsupportedSteps']:
+        raise ValueError('Actual frozen Q1 validator no longer proves the exact unavailable14/15 request shapes')
+    # Recheck captured proof/source bytes after the pure child and before mutation.
+    pin(request['releasedWorkDeferral']); pin(review['availabilityReview'])
+    pin(_short_pin(owner))
+    for value in review['priorityEvidence']:
+        pin(value)
+    if inventory(request['executor']) != request['executorPins']:
+        raise ValueError('Availability probe source changed')
+    api().owner_evidence(review, Path(request['releasedWorkDeferral']['path']))
+    return True
 
 
 def prepare(p, path):
@@ -312,7 +379,8 @@ def prepare(p, path):
             'qualificationId', 'qualificationPacket', 'executor', 'installation', 'protectedInputs',
             'taskAccounting', 'knownFault', 'ownerAuthorization', 'deadlineUtc', 'verifiedBy', 'reason',
             'installationPlan', 'baselineAudit', 'prospectiveSubject', 'caseReview'}
-    if set(raw) != keys or raw['schemaVersion'] != 1 or raw['kind'] != 'one-shot-diagnostic-preparation':
+    if (set(raw) not in (keys, keys | {'releasedWorkDeferral'}) or raw['schemaVersion'] != 1
+            or raw['kind'] != 'one-shot-diagnostic-preparation'):
         raise ValueError('Exact versioned diagnostic preparation required')
     for key in ('id', 'slotId', 'orderId', 'cycleId', 'qualificationId'):
         if not m.SAFE_ID.fullmatch(raw[key]):
@@ -359,6 +427,9 @@ def prepare(p, path):
                'reviewPins': [raw['knownFault'], raw['taskAccounting'], raw['installationPlan'], raw['baselineAudit'], raw['prospectiveSubject'], raw['caseReview'], slot_request_pin,
                               _short_pin(plan['sourceArchive']), _short_pin(plan['originalSidecar']['pin']),
                               *fault['evidence'], *[x['source'] for x in items]]}
+    if raw.get('releasedWorkDeferral'):
+        deferred = read_pin(raw['releasedWorkDeferral'])
+        request['reviewPins'].extend([raw['releasedWorkDeferral'], deferred['availabilityReview'], *deferred['priorityEvidence']])
     with p.connect() as con:
         qrow = con.execute('SELECT request FROM qualifications WHERE id=?', (request['qualificationId'],)).fetchone()
     if not qrow:
@@ -389,7 +460,7 @@ def prepare(p, path):
         for existing in con.execute("SELECT id FROM diagnostic_admissions WHERE status IN ('preparing','frozen','consumed')"):
             raise ValueError('Another diagnostic owns unresolved preparation/admission: ' + existing['id'])
         _installed(request, False)
-        if _pending_released_authority(p, con):
+        if _pending_released_authority(p, con, request):
             raise ValueError('Valid released work owns installation before diagnostic preparation')
         slot = None
         for candidate in con.execute("SELECT * FROM cycle_slots WHERE status='waiting' ORDER BY seq").fetchall():

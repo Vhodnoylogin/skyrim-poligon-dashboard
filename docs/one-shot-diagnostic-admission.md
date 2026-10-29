@@ -72,6 +72,22 @@ ownerAuthorization:ordinary independently verified owner evidence
 deadlineUtc,verifiedBy,reason
 ```
 
+One optional field is `releasedWorkDeferral:{path,sha256}`. It is NOT a global
+defer API or job lifecycle. It applies only to the exact untouched released
+Morphbench static-capsules order reviewed for this first case. Without the
+review, valid pending released work blocks preparation even under the Q1 hold.
+The pinned `one-shot-unavailable-preparation-deferral` review binds diagnosticId,
+approved subject specification, same current owner/deadline, priority evidence,
+Q1 executor inventory hash and the independently anchored availability review.
+The source rechecks exact queue/request/release/owner/event facts, absence of
+preparation/attempt/file traces, and the same frozen pure platform validator's
+exact fourteen unsupported shapes out of fifteen. Import/I/O/runtime errors or
+now-supported methods are not unsupported-capability proof. Any other ready
+release still blocks. The Morphbench order, release, history, queued status,
+files and counts remain unchanged; no packet, failure or notification is created.
+The deferral pin/audit belongs only to this immutable diagnostic preparation and
+grants no later admission, renewed deadline or extra start.
+
 `installation` must equal the ten original archive members/destinations in the
 anchored plan. Original archive/sidecar and baseline audit remain pinned. The
 anchored slot has seven write paths while the old plan has six; both remain

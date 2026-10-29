@@ -3,6 +3,7 @@ import copy
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import struct
 import subprocess
 import tempfile
@@ -45,6 +46,7 @@ class DiagnosticTests(unittest.TestCase):
         (pkg / 'config.py').write_text('import json\nfrom pathlib import Path\ndef load(p):\n x=json.loads(Path(p).read_text());x.setdefault("fixture_dir",None);x.setdefault("collected_files",[]);x.setdefault("subject_state_bindings",{});return x\n')
         (pkg / 'scenarios.py').write_text('def validate(s): assert s["steps"]\n')
         (pkg / 'restart_budget.py').write_text('def plan(s): return {"maximum":0}\n')
+        (pkg / 'platform.py').write_text('def validate(a):\n if a["operation"]!="state.read": raise ValueError("Unsupported world observation")\n')
         self.ini = self.root / 'mo2.ini'; self.ini.write_text('selected_profile=Core\n')
         self.profile = self.root / 'profiles' / 'Core'; self.profile.mkdir(parents=True)
         (self.profile / 'modlist.txt').write_text('+original\n')
@@ -493,6 +495,101 @@ class DiagnosticTests(unittest.TestCase):
             con.execute("UPDATE releases SET authorization=? WHERE id='batch'", (json.dumps(release),))
         self.prepare()
         self.assertEqual(self.p.get('standard')['status'], 'queued')
+
+    def unavailable_morphbench(self):
+        order = self.order_template(); order.pop('cycle'); order['id'] = d.MF_ORDER_ID
+        order['sourceChat'] = 'morphbench'; order['sourceThreadId'] = 'mf-origin'
+        for x in order['inputs']: x['sha256'] = m.digest(x['path'])
+        steps = [{'name': 'MF-ready', 'operation': 'state.read', 'assert': [{'field': 'world.ready', 'equals': True}]}]
+        steps += [{'name': 'MF-'+str(i), 'operation': 'world.read', 'parameters': {'request': {'observation': 'unsupported-capsule'}},
+                   'assert': [{'field': 'capsule.present', 'equals': True}]} for i in range(14)]
+        order['subjectPlan']['steps'] = steps
+        order['testing'] = {'start': {'kind': 'check', 'name': 'MF-ready'}, 'checks': [{'name': x['name'], 'role': 'subject'} for x in steps]}
+        path = self.root/'mf.json'; m.write(path, order); self.p.submit(path)
+        mf_owner = self.root/'mf-owner.txt'; mf_owner.write_text('Test Morphbench on SE')
+        mf_auth = {**self.auth, 'threadId': 'mf-human-thread', 'messageId': 'mf-human-message',
+                   'path': str(mf_owner), 'sha256': m.digest(mf_owner), 'quote': mf_owner.read_text()}
+        release = {'schemaVersion': 1, 'id': 'mf-release', 'orderIds': [d.MF_ORDER_ID], 'ownerAuthorization': mf_auth}
+        path = self.root/'mf-release.json'; m.write(path, release); self.p.release_batch(path)
+        with self.p.connect() as con:
+            row = dict(con.execute('SELECT * FROM jobs WHERE id=?', (d.MF_ORDER_ID,)).fetchone())
+            rel = con.execute("SELECT authorization FROM releases WHERE id='mf-release'").fetchone()[0]
+            events = [{'seq': x['seq'], 'status': x['status']} for x in con.execute('SELECT seq,status FROM events WHERE id=? ORDER BY seq', (d.MF_ORDER_ID,))]
+        availability = {'kind': 'read-only-pending-morphbench-deferral-path-review', 'orderId': d.MF_ORDER_ID, 'status': 'queued',
+                        'schemaVersion': 2, 'requestStringSha256': d.hashlib.sha256(row['request'].encode()).hexdigest(),
+                        'releaseId': 'mf-release', 'releaseStringSha256': d.hashlib.sha256(rel.encode()).hexdigest(),
+                        'releaseOwnerEvidence': mf_auth, 'events': events, 'releaseHasDeadlineUtc': False,
+                        'actualNativeAttempts': 0, 'packet': None, 'delivery': None, 'liveWrites': False, 'nativeCalls': False, 'DBWrites': False,
+                        'scenarioSteps': 15, 'unsupportedSteps': [{'step': x['name'], 'error': 'Unsupported world observation'} for x in steps[1:]]}
+        path = self.root/'availability.json'; m.write(path, availability)
+        original = d.MF_AVAILABILITY_REVIEW_SHA256; d.MF_AVAILABILITY_REVIEW_SHA256 = m.digest(path)
+        self.addCleanup(setattr, d, 'MF_AVAILABILITY_REVIEW_SHA256', original)
+        review = {'schemaVersion': 1, 'kind': 'one-shot-unavailable-preparation-deferral', 'diagnosticId': 'diag',
+                  'subjectSpecificationSha256': d.APPROVED_SUBJECT_SPECIFICATION_SHA256, 'deadlineUtc': self.cycle['deadlineUtc'],
+                  'ownerAuthorization': self.auth, 'availabilityReview': d.file_pin(path),
+                  'q1ExecutorInventorySha256': m.subject_contract.identity(d.inventory(self.executor)),
+                  'priorityEvidence': [d.file_pin(self.owner)], 'verifiedBy': 'offline', 'reason': 'Unavailable14/15; one supported first case only'}
+        path = self.root/'deferral.json'; m.write(path, review)
+        self.request['releasedWorkDeferral'] = d.file_pin(path); m.write(self.prepare_path, self.request)
+        return row, rel, events
+
+    def test_exact_unavailable_deferral_preserves_mf_and_grants_only_own_fifo(self):
+        before = self.unavailable_morphbench()
+        no_review = dict(self.request); no_review.pop('releasedWorkDeferral'); m.write(self.prepare_path, no_review)
+        with self.assertRaises(ValueError): self.prepare()
+        m.write(self.prepare_path, self.request); self.prepare()
+        with self.p.connect() as con:
+            after = (dict(con.execute('SELECT * FROM jobs WHERE id=?', (d.MF_ORDER_ID,)).fetchone()),
+                     con.execute("SELECT authorization FROM releases WHERE id='mf-release'").fetchone()[0],
+                     [{'seq': x['seq'], 'status': x['status']} for x in con.execute('SELECT seq,status FROM events WHERE id=? ORDER BY seq', (d.MF_ORDER_ID,))])
+        self.assertEqual(before, after)
+        self.assertFalse(self.p.evidence_dir(d.MF_ORDER_ID).exists())
+        self.assertEqual(self.p.slots()[0]['status'], 'reserved')
+
+    def test_deferral_changed_release_active_trace_or_supported_now_refuses(self):
+        self.unavailable_morphbench()
+        with self.p.connect() as con:
+            original = con.execute("SELECT authorization FROM releases WHERE id='mf-release'").fetchone()[0]
+            con.execute("UPDATE releases SET authorization=? WHERE id='mf-release'", (original+' ',))
+        with self.assertRaises(ValueError): self.prepare()
+        with self.p.connect() as con:
+            con.execute("UPDATE releases SET authorization=? WHERE id='mf-release'", (original,))
+            con.execute('INSERT INTO attempts VALUES(?,-1)', (d.MF_ORDER_ID,))
+        with self.assertRaises(ValueError): self.prepare()
+        with self.p.connect() as con: con.execute('DELETE FROM attempts WHERE id=?', (d.MF_ORDER_ID,))
+        with patch.object(d.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='[]')):
+            with self.assertRaisesRegex(ValueError, 'no longer proves'): self.prepare()
+        with self.p.connect() as con:
+            self.assertEqual(con.execute('SELECT COUNT(*) FROM diagnostic_admissions').fetchone()[0], 0)
+
+    def test_deferral_child_cannot_cross_original_authority_deadline(self):
+        self.unavailable_morphbench()
+        actual = d.subprocess.run
+        deadline = self.request['deadlineUtc']; clock = [time.time()]
+        def advance(*args, **kwargs):
+            result = actual(*args, **kwargs); clock[0] = deadline+1; return result
+        with patch.object(d.subprocess, 'run', side_effect=advance), patch.object(d.time, 'time', side_effect=lambda: clock[0]):
+            with self.assertRaisesRegex(ValueError, 'deadline'): self.prepare()
+        with self.p.connect() as con:
+            self.assertEqual(con.execute("SELECT status FROM cycle_slots WHERE id='slot'").fetchone()[0], 'waiting')
+
+    def test_distinct_mf_owner_cannot_drift_during_capability_child(self):
+        self.unavailable_morphbench(); actual = d.subprocess.run
+        def drift(*args, **kwargs):
+            result = actual(*args, **kwargs)
+            (self.root/'mf-owner.txt').write_text('changed during pure probe')
+            return result
+        with patch.object(d.subprocess, 'run', side_effect=drift):
+            with self.assertRaises(ValueError): self.prepare()
+        with self.p.connect() as con:
+            self.assertEqual(con.execute('SELECT COUNT(*) FROM diagnostic_admissions').fetchone()[0], 0)
+
+    def test_exact_mf_deferral_does_not_skip_another_valid_ready_release(self):
+        self.unavailable_morphbench(); self.standard_release()
+        with self.assertRaisesRegex(ValueError, 'Valid released work'):
+            self.prepare()
+        self.assertEqual(self.p.get('standard')['status'], 'queued')
+        self.assertEqual(self.p.get(d.MF_ORDER_ID)['status'], 'queued')
 
 
 if __name__ == '__main__':
