@@ -14,7 +14,7 @@ SNAPSHOTS = 'managed-mo2-collection-implementation'
 FLAGS = ('managedIniBoundaryReviewed', 'nativeCompletionReviewed', 'restorationReviewed', 'archiveReviewed', 'retainHold')
 
 
-def _checked(p, row, plan, review_path, con):
+def _checked(p, row, plan, review_path, con, review_pin):
     m = _api()
     identity = plan['id']
     folder = _absolute(str(p.local / 'qualifications' / identity))
@@ -27,7 +27,9 @@ def _checked(p, row, plan, review_path, con):
         raise ValueError('Another qualification owner blocks collection')
     if not con.execute('SELECT id FROM attempts WHERE id=?', ('qualification-' + identity,)).fetchone():
         raise ValueError('Original native admission required')
-    review_path, raw = read_pin({'path': str(review_path), 'sha256': _hash(review_path)})
+    pinned_path, raw = read_pin(review_pin)
+    if pinned_path != review_path:
+        raise ValueError('Exact original collection-review path required')
     review = document(raw)
     if (review.get('schemaVersion') != 1 or review.get('kind') != 'qualification-managed-mo2-collection-review'
             or review.get('qualificationId') != identity or any(review.get(k) is not True for k in FLAGS)):
@@ -94,12 +96,15 @@ def verify(p, row, plan):
     """Called only by final collection, never generic verification/recovery."""
     folder = _absolute(str(p.local / 'qualifications' / plan['id']))
     pointer = folder / POINTER
-    review_path = _pin(_api().read(pointer))
-    review = _api().read(review_path)
+    pointer_pin = {'path': str(pointer), 'sha256': _hash(pointer)}
+    _, pointer_raw = read_pin(pointer_pin)
+    reference = document(pointer_raw)
+    review_path, raw = read_pin(reference)
+    review = document(raw)
     observer = _observer(review['observer'])
     with observer.SessionMutex(), p.connect() as con:
         con.execute('BEGIN IMMEDIATE')
-        review, boundary, identities, paths = _checked(p, row, plan, review_path, con)
+        review, boundary, identities, paths = _checked(p, row, plan, review_path, con, reference)
         _native(observer, identities)
         frozen = _frozen_inputs(review, boundary)
         snapshots = folder / SNAPSHOTS
@@ -108,9 +113,30 @@ def verify(p, row, plan):
         for name, raw in frozen.items():
             if _hash(snapshots / name) != hashlib.sha256(raw).hexdigest():
                 raise ValueError('Frozen managed-MO2 collection bytes changed')
+        paths = sorted(set(paths + [pointer] + list(snapshots.iterdir())))
+        pins = [{'path': str(path), 'sha256': _hash(path)} for path in paths]
+        if (next(pin for pin in pins if pin['path'] == str(pointer)) != pointer_pin
+                or next(pin for pin in pins if pin['path'] == str(review_path)) != reference):
+            raise ValueError('Verified managed-MO2 pointer/review changed')
+        # Validate the captured hashes, not replacement bytes, while ownership
+        # and the native mutex still protect this completion check.
+        checked_review, _, checked_identities, checked_paths = _checked(p, row, plan, review_path, con, reference)
+        if checked_paths != [path for path in paths if path != pointer and path.parent != snapshots]:
+            raise ValueError('Verified managed-MO2 evidence membership changed')
+        _native(observer, checked_identities)
+        captured = {'reviewReference': dict(reference), 'files': pins}
+        recheck(captured)
         summary = {key: value for key, value in boundary.items() if key not in ('frozen', 'paths', 'ini', 'proofPath')}
         summary.update(originalPlanUnchanged=True, qualificationPassed=False, holdRetained=True)
-        return paths + [pointer] + sorted(snapshots.iterdir()), summary
+        captured['summary'] = summary
+        return captured
+
+
+def recheck(captured):
+    """Refuse post-verification swaps; never adopt a freshly calculated hash."""
+    _pin(captured['reviewReference'])
+    for pin in captured['files']:
+        _pin(pin)
 
 
 def record(p, identity, review_path):
@@ -130,11 +156,12 @@ def record(p, identity, review_path):
             return p.qualification_collect(identity)  # Frozen historical evidence only.
         verify(p, row, plan)
         return p.qualification_collect(identity)
-    review = m.read(review_path)
+    _, raw = read_pin(reference)
+    review = document(raw)
     observer = _observer(review['observer'])
     with observer.SessionMutex(), p.connect() as con:
         con.execute('BEGIN IMMEDIATE')
-        review, boundary, identities, paths = _checked(p, row, plan, review_path, con)
+        review, boundary, identities, paths = _checked(p, row, plan, review_path, con, reference)
         _native(observer, identities)
         if snapshots.exists():
             raise ValueError('Unregistered managed-MO2 collection artifact requires review')
@@ -145,7 +172,7 @@ def record(p, identity, review_path):
                 stream.write(raw)
         for path in paths:
             _hash(path)
-        _checked(p, row, plan, review_path, con)
+        _checked(p, row, plan, review_path, con, reference)
         _native(observer, identities)
         if _hash(review_path) != reference['sha256']:
             raise ValueError('Managed-MO2 collection review changed')
@@ -156,8 +183,8 @@ def record(p, identity, review_path):
 
 
 def verify_packet_archive(packet):
-    review_path = _pin(packet['managedMo2Collection'])
-    review = _api().read(review_path)
+    _, raw = read_pin(packet['managedMo2Collection'])
+    review = document(raw)
     if (review.get('kind') != 'qualification-managed-mo2-collection-review'
             or review.get('qualificationId') != packet.get('id') or packet.get('executionOutcome') != 'failed'
             or packet.get('actualGameStarts') != 1 or packet.get('qualificationPassed') is not False):
