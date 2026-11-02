@@ -194,7 +194,7 @@ class Qualifications:
                 if old['request'] != canonical:
                     raise ValueError('Qualification identity is immutable')
                 return {'id': request['id'], 'duplicate': True}
-            if (self.qualification_busy(con) or con.execute("SELECT id FROM qualifications WHERE status NOT IN ('recorded','released')").fetchone()
+            if (self.qualification_busy(con) or self.qualification_unsettled(con)
                     or con.execute('SELECT id FROM jobs WHERE id=?', (order['id'],)).fetchone()):
                 raise ValueError('Recover existing owner or qualification first; do not reuse mod orders')
             con.execute("INSERT INTO qualifications VALUES(?,?,'prepared',NULL,NULL)", (request['id'], canonical))
@@ -202,6 +202,13 @@ class Qualifications:
                         ('qualification-' + request['id'], 'Exclusive qualification lease; retain after completion until owner-reviewed clearance'))
             self.event(con, request['id'], 'qualification_prepared')
         return {'id': request['id'], 'status': 'prepared', 'holdId': 'qualification-' + request['id']}
+
+    def qualification_unsettled(self, con):
+        from qualification_terminal import settled_abandonment
+        for row in con.execute("SELECT * FROM qualifications WHERE status NOT IN ('recorded','released')").fetchall():
+            if not settled_abandonment(self, con, row):
+                return True
+        return False
 
     def qualification_guard(self, con, identity):
         if self.qualification_busy(con):
@@ -460,11 +467,22 @@ class Qualifications:
             return False
         declared = {c['name']: c['role'] for c in plan['orderData']['testing']['checks']}
         checks = projection.get('coverage', {}).get('checks', [])
+        actual = None
         if len(checks) != len(declared) or {c['name'] for c in checks} != set(declared):
-            return False
+            from qualification_bootstrap import declared_tool_checks_after_new_game_prefix
+            try:
+                actual = m.read(Path(packet['runDirectory']) / 'result.json').get('checks', [])
+                if not declared_tool_checks_after_new_game_prefix(plan, packet, checks, actual):
+                    return False
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                return False
+            # Local declared-scope classification only; the raw packet/projection
+            # and the unknown bootstrap roles remain byte-exact evidence.
+            checks = [check for check in checks if check['name'] in declared]
         observations = {s['name'] for s in plan['scenario']['steps']
                         if s.get('observe') is True and not s.get('assert')}
-        actual = m.read(Path(packet['runDirectory']) / 'result.json').get('checks', [])
+        if actual is None:
+            actual = m.read(Path(packet['runDirectory']) / 'result.json').get('checks', [])
         for check in checks:
             if check['status'] == 'passed':
                 continue

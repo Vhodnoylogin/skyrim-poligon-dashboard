@@ -84,6 +84,12 @@ globally qualified platform by the result itself.
    `qualification-<id>` to the SAME pipeline holds. It permits an existing
    unrelated hold, but refuses existing active job/session/retry/installation
    owners and unfinished qualifications. It never launches or clears anything.
+   A retained `abandoned` reservation is settled only when its exact prepared/
+   abandoned history and hash-pinned technical review prove zero starts, no
+   dispatch and settled installation, with matching accounting and owner evidence.
+   Its old row and evidence remain unchanged; a bare terminal label, contradictory
+   native/admission evidence or a remaining own hold still blocks registration.
+   Later unrelated runtime/source reuse does not undo a proven historical finish.
 3. `qualification-check <id>` validates config/scenario/restart budget in a fresh
    candidate process, without running/recovering/configuring the native runner.
 4. Obtain separately scoped human clearance for the old hold, then use the
@@ -180,6 +186,23 @@ For example, capture-provider discovery does not assert visual capture quality.
 Such observations never satisfy subject/fixture assertions or missing/unknown
 checks. Their original incomplete/unavailable coverage projection stays unchanged
 in the packet; normal completion does not turn them into passed tests.
+
+A separate completion-only compatibility rule recognizes one five-step SE
+`new-game` / `QASmoke` tooling plan: observed Journal Menu close, observed Tutorial
+Menu close, passed `world.ready == true`, then exactly two declared passed
+`world.read` checks for `human-preset-catalog` and `human-provider-config`.
+Both declared roles must be `tooling`, with testing starting at the first declared
+check. The exact six native results include the separately recognized, same-run
+`new-game-world-transition` auxiliary check, with unique names and the required
+ordered startup observations. Added/missing steps, substituted prefix assertions,
+subject/fixture roles or missing required results refuse this exception.
+
+This rule permits technical review of only those two declared tooling checks.
+It preserves the packet's original incomplete outcome and three unknown prefix
+roles, establishes no subject progress or general provider qualification, and
+changes no ordinary order/report projection. The same source/evidence pins,
+one-start accounting, normal exit, archive/removal, restoration and lease checks
+remain mandatory. It introduces no command for abandoning a prepared reservation.
 
 It refuses any other hold or active owner/installation, another pending
 qualification, previously released ordinary waiting jobs, cycle-bound waiting
