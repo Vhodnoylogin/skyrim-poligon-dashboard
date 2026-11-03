@@ -210,7 +210,7 @@ class Qualifications:
                 if old['request'] != canonical:
                     raise ValueError('Qualification identity is immutable')
                 return {'id': request['id'], 'duplicate': True}
-            if (self.qualification_busy(con) or con.execute("SELECT id FROM qualifications WHERE status NOT IN ('recorded','released')").fetchone()
+            if (self.qualification_busy(con) or self.qualification_unsettled(con)
                     or con.execute('SELECT id FROM jobs WHERE id=?', (order['id'],)).fetchone()):
                 raise ValueError('Recover existing owner or qualification first; do not reuse mod orders')
             con.execute("INSERT INTO qualifications VALUES(?,?,'prepared',NULL,NULL)", (request['id'], canonical))
@@ -218,6 +218,13 @@ class Qualifications:
                         ('qualification-' + request['id'], 'Exclusive qualification lease; retain after completion until owner-reviewed clearance'))
             self.event(con, request['id'], 'qualification_prepared')
         return {'id': request['id'], 'status': 'prepared', 'holdId': 'qualification-' + request['id']}
+
+    def qualification_unsettled(self, con):
+        from qualification_terminal import settled_abandonment
+        for row in con.execute("SELECT * FROM qualifications WHERE status NOT IN ('recorded','released')").fetchall():
+            if not settled_abandonment(self, con, row):
+                return True
+        return False
 
     def qualification_guard(self, con, identity):
         if self.qualification_busy(con):

@@ -54,6 +54,14 @@ excluded from the restart text scan; the original request and its pins remain
 unchanged. Other restart fields/selectors remain forbidden, and candidate
 validation plus the zero-restart budget check still apply.
 
+Registration also recognizes an existing supported pre-dispatch abandonment as
+settled only after verifying its exact two-event lifecycle, zero starts, unchanged
+accounting, original-request hash, pinned review/owner evidence and lack of any
+qualification hold, attempt or native dispatch artifacts. A bare `abandoned`
+label, missing/changed evidence, unknown status or active owner still blocks.
+This read-only recognition changes no historical row, grants no launch authority
+and introduces no new abandonment/clearance command.
+
 ### A new qualification after an unresolved historical count
 
 Historical uncertainty does not become zero or an observed minimum when the owner
