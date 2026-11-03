@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -104,6 +105,21 @@ class Qualifications:
             raise ValueError('Qualification requires generic steps without probes/postSteps')
         for step in scenario['steps']:
             args = step.get('args', {})
+            request_args = args.get('request') if isinstance(args, dict) else None
+            if (step.get('tool') == 'platform' and isinstance(request_args, dict)
+                    and set(args) == {'operation', 'request'}
+                    and args.get('operation') == 'object.perform'
+                    and set(request_args) == {'domain', 'action', 'saveLabel', 'maximumLoads', 'processRestart'}
+                    and request_args.get('domain') == 'save-state'
+                    and request_args.get('action') == 'load-owned-disposable-once'
+                    and isinstance(request_args.get('saveLabel'), str)
+                    and re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,79}', request_args['saveLabel'])
+                    and type(request_args.get('maximumLoads')) is int and request_args['maximumLoads'] == 1
+                    and request_args.get('processRestart') is False):
+                # The exact owned load is same-process. Omit only this false flag
+                # from the text scan; retain the original request for pins/run.
+                args = {**args, 'request': {key: value for key, value in request_args.items()
+                                           if key != 'processRestart'}}
             if (step.get('tool') in ('console', 'game') or
                     'restart' in json.dumps(args).lower()):
                 raise ValueError('Qualification forbids restarts and arbitrary game/console commands')

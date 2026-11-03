@@ -46,6 +46,14 @@ restart selectors, physical probe kinds or postSteps. Owned save/load is allowed
 it is not a process restart. The candidate's validator and restart-budget planner
 must accept the scenario with zero reserved restarts.
 
+Admission permits the explicit `processRestart:false` field only in the exact
+`platform` / `object.perform` owned-load request: `domain:"save-state"`,
+`action:"load-owned-disposable-once"`, a bounded `saveLabel`, integer
+`maximumLoads:1` and no extra argument/request fields. Only that false flag is
+excluded from the restart text scan; the original request and its pins remain
+unchanged. Other restart fields/selectors remain forbidden, and candidate
+validation plus the zero-restart budget check still apply.
+
 ### A new qualification after an unresolved historical count
 
 Historical uncertainty does not become zero or an observed minimum when the owner

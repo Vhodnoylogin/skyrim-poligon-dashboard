@@ -274,6 +274,121 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Dedicated schema1'):
             self.register()
 
+    def owned_load_step(self):
+        return {'name': 'tool-check', 'tool': 'platform',
+                'args': {'operation': 'object.perform', 'request': {
+                    'domain': 'save-state', 'action': 'load-owned-disposable-once',
+                    'saveLabel': 'owned-two', 'maximumLoads': 1, 'processRestart': False}},
+                'assert': [{'path': 'load.completed', 'equals': True}]}
+
+    def reject_restart_step(self, step):
+        self.scenario['steps'] = [step]
+        m.write(self.root / 'scenario.json', self.scenario)
+        with self.assertRaisesRegex(ValueError, 'forbids restarts'):
+            self.register()
+        with self.p.connect() as con:
+            self.assertEqual(con.execute('SELECT COUNT(*) FROM qualifications').fetchone()[0], 0)
+            self.assertEqual(con.execute('SELECT COUNT(*) FROM pipeline_holds').fetchone()[0], 0)
+
+    def test_same_process_owned_load_preserves_original_bytes_and_pins(self):
+        self.scenario['steps'] = [self.owned_load_step()]
+        original = json.loads(json.dumps(self.scenario))
+        m.write(self.root / 'scenario.json', self.scenario)
+        m.write(self.path, self.request)
+        files = [self.path, self.root / 'order.json', self.root / 'config.json', self.root / 'scenario.json']
+        original_bytes = {str(file): file.read_bytes() for file in files}
+        original_digests = {str(file): m.digest(file) for file in files}
+        self.assertEqual(self.p.register_qualification(self.path)['status'], 'prepared')
+        self.assertTrue(self.p.qualification_check('candidate-one')['validated'])
+        plan = json.loads(self.p.qualification_show('candidate-one')['request'])
+        self.assertEqual(plan['scenario'], original)
+        self.assertIs(plan['scenario']['steps'][0]['args']['request']['processRestart'], False)
+        pins = {pin['path']: pin['sha256'] for pin in plan['pins']}
+        for file in files:
+            with self.subTest(file=file.name):
+                self.assertEqual(file.read_bytes(), original_bytes[str(file)])
+                self.assertEqual(m.digest(file), original_digests[str(file)])
+                self.assertEqual(pins[str(file)], original_digests[str(file)])
+        self.assertEqual(m.read(self.p.local / 'config.json'), self.host)
+        self.assertFalse((self.root / 'runtime').exists())
+        self.assertEqual(self.p.qualification_show('candidate-one')['status'], 'prepared')
+
+    def test_owned_load_requires_literal_false_and_one_integer_load(self):
+        variants = [('processRestart', value) for value in (True, 0, 1, None, 'false')]
+        variants += [('maximumLoads', value) for value in (True, 0, 2, 1.0, None, '1')]
+        for field, value in variants:
+            with self.subTest(field=field, value=value):
+                step = self.owned_load_step()
+                step['args']['request'][field] = value
+                self.reject_restart_step(step)
+
+    def test_owned_load_exception_requires_exact_supported_request_shape(self):
+        variants = [('domain', 'other'), ('action', 'other'),
+                    ('scope', 'foreign-profile'), ('extra', False),
+                    ('saveLabel', ''), ('saveLabel', 'a' * 81), ('saveLabel', 'not/a/tag'),
+                    ('saveLabel', None), ('saveLabel', 'RESTART_GAME'),
+                    ('operation', 'world.read'), ('operation', 'input.perform'),
+                    ('tool', 'inspect'), ('tool', 'game'), ('tool', 'console'),
+                    ('extra-args', False), ('nested-args', {'processRestart': False}),
+                    ('nested-request', {'processRestart': False}),
+                    ('missing', 'saveLabel'), ('missing', 'maximumLoads'),
+                    ('case-altered-flag', None)]
+        for field, value in variants:
+            with self.subTest(field=field, value=value):
+                step = self.owned_load_step()
+                if field == 'tool':
+                    step['tool'] = value
+                elif field == 'operation':
+                    step['args']['operation'] = value
+                elif field in ('extra-args', 'nested-args'):
+                    step['args']['extra'] = value
+                elif field == 'nested-request':
+                    step['args']['request'] = {'nested': step['args']['request']}
+                elif field == 'missing':
+                    del step['args']['request'][value]
+                elif field == 'case-altered-flag':
+                    step['args']['request']['processrestart'] = step['args']['request'].pop('processRestart')
+                else:
+                    step['args']['request'][field] = value
+                self.reject_restart_step(step)
+
+    def test_owned_load_exception_still_rejects_real_restart_selectors_and_nested_flags(self):
+        for operation, action in [('input.perform', 'restart_game'),
+                                  ('object.perform', 'restart_with_fixture_subject_settings')]:
+            with self.subTest(operation=operation, action=action):
+                step = self.owned_load_step()
+                step['args'] = {'operation': operation, 'request': {'action': action}}
+                self.reject_restart_step(step)
+        for location in ('args', 'request'):
+            with self.subTest(location=location):
+                step = self.owned_load_step()
+                target = step['args'] if location == 'args' else step['args']['request']
+                target['extraRestart'] = {'nested': ['restart_game']}
+                self.reject_restart_step(step)
+
+    def test_owned_load_still_requires_zero_candidate_restart_budget(self):
+        (self.candidate / 'skyrim_autotest/restart_budget.py').write_text(
+            "def plan(s): return {'maximum':1}\n")
+        self.scenario['steps'] = [self.owned_load_step()]
+        m.write(self.root / 'scenario.json', self.scenario)
+        self.register()
+        with self.assertRaisesRegex(ValueError, 'Qualification cannot reserve a restart'):
+            self.p.qualification_check('candidate-one')
+        self.assertEqual(self.p.qualification_show('candidate-one')['status'], 'prepared')
+        self.assertEqual(len(self.p.pipeline_status()['holds']), 1)
+        self.assertFalse((self.root / 'runtime').exists())
+
+    def test_owned_load_still_requires_candidate_scenario_validation(self):
+        (self.candidate / 'skyrim_autotest/scenarios.py').write_text(
+            "def validate(s): raise ValueError('Candidate scenario refused')\n")
+        self.scenario['steps'] = [self.owned_load_step()]
+        m.write(self.root / 'scenario.json', self.scenario)
+        self.register()
+        with self.assertRaisesRegex(ValueError, 'Candidate scenario refused'):
+            self.p.qualification_check('candidate-one')
+        self.assertEqual(self.p.qualification_show('candidate-one')['status'], 'prepared')
+        self.assertFalse((self.root / 'runtime').exists())
+
     def test_expired_authority_does_not_claim(self):
         self.register()
         with patch('time.time', return_value=self.request['deadlineUtc']+1):
